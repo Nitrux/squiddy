@@ -106,7 +106,7 @@ void InstallationPlanController::setAvailableLanguages(const QStringList& choice
 {
     if (m_debugMode || m_availableLanguages == choices) return;
     m_availableLanguages = choices;
-    emit choicesChanged();
+    Q_EMIT choicesChanged();
     invalidatePlan();
 }
 
@@ -114,7 +114,7 @@ void InstallationPlanController::setAvailableLocales(const QStringList& choices)
 {
     if (m_debugMode || m_availableLocales == choices) return;
     m_availableLocales = choices;
-    emit choicesChanged();
+    Q_EMIT choicesChanged();
     invalidatePlan();
 }
 
@@ -122,7 +122,7 @@ void InstallationPlanController::setAvailableTimeZones(const QStringList& choice
 {
     if (m_debugMode || m_availableTimeZones == choices) return;
     m_availableTimeZones = choices;
-    emit choicesChanged();
+    Q_EMIT choicesChanged();
     invalidatePlan();
 }
 
@@ -130,7 +130,7 @@ void InstallationPlanController::setAvailableKeyboardLayouts(const QStringList& 
 {
     if (m_debugMode || m_availableKeyboardLayouts == choices) return;
     m_availableKeyboardLayouts = choices;
-    emit choicesChanged();
+    Q_EMIT choicesChanged();
     invalidatePlan();
 }
 
@@ -139,7 +139,7 @@ void InstallationPlanController::setAvailableTargetDisks(const QStringList& choi
     if (m_debugMode || m_availableTargetDisks == choices) return;
     m_availableTargetDisks = choices;
     invalidateStoragePreflight();
-    emit choicesChanged();
+    Q_EMIT choicesChanged();
     invalidatePlan();
 }
 
@@ -470,7 +470,7 @@ bool InstallationPlanController::validateAndBuildPlan()
     }
     updateValidation();
     if (!planValid()) {
-        emit planChanged();
+        Q_EMIT planChanged();
         return false;
     }
 
@@ -527,7 +527,7 @@ bool InstallationPlanController::validateAndBuildPlan()
     };
 
     m_validatedPlan = std::move(plan);
-    emit planChanged();
+    Q_EMIT planChanged();
     return true;
 }
 
@@ -565,7 +565,7 @@ void InstallationPlanController::runStoragePreflight()
     const bool encryptHome = m_encryptHome;
     const bool encryptVarLib = m_encryptVarLib;
     updateValidation();
-    emit planChanged();
+    Q_EMIT planChanged();
 
     const QPointer<InstallationPlanController> guard(this);
     QThreadPool::globalInstance()->start(QRunnable::create(
@@ -586,7 +586,7 @@ void InstallationPlanController::runStoragePreflight()
                 guard->m_targetDiskBytes = result.diskBytes;
                 guard->m_logicalBlockSize = result.logicalBlockSize;
                 guard->updateValidation();
-                emit guard->planChanged();
+                Q_EMIT guard->planChanged();
             }, Qt::QueuedConnection);
         }));
 }
@@ -602,14 +602,14 @@ void InstallationPlanController::acceptStoragePreflightResult(const StoragePrefl
     m_targetDiskBytes = result.diskBytes;
     m_logicalBlockSize = result.logicalBlockSize;
     updateValidation();
-    emit planChanged();
+    Q_EMIT planChanged();
 }
 
 void InstallationPlanController::invalidatePlan()
 {
     m_validatedPlan.reset();
     updateValidation();
-    emit planChanged();
+    Q_EMIT planChanged();
 }
 
 void InstallationPlanController::updateValidation()

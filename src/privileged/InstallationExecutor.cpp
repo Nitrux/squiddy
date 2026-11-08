@@ -51,7 +51,7 @@ struct CryptMapperGuard {
 QString partitionPath(const QString& disk, int number)
 {
     const QString base = QFileInfo(disk).fileName();
-    return disk + (base.endsWith(QRegularExpression(QStringLiteral("[0-9]"))) ? QStringLiteral("p") : QString())
+    return disk + (QRegularExpression(QStringLiteral("[0-9]$")).match(base).hasMatch() ? QStringLiteral("p") : QString())
         + QString::number(number);
 }
 
@@ -298,12 +298,14 @@ bool applyConfig(const InstallationPlan& plan, const QString& root, const QStrin
         ? uuidFor(partitionPath(plan.targetDevice, 4), error) : QString();
     if ((homeLuks.isEmpty() && homeFilesystemUuid.isEmpty())
         || (varLuks.isEmpty() && varFilesystemUuid.isEmpty())) return false;
-    fstab += homeLuks.isEmpty()
-        ? "UUID=" + homeFilesystemUuid.toLatin1() + " /home f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n"
-        : "/dev/mapper/nx_home /home f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
-    fstab += varLuks.isEmpty()
-        ? "UUID=" + varFilesystemUuid.toLatin1() + " /var/lib f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n"
-        : "/dev/mapper/nx_var_lib /var/lib f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
+    if (homeLuks.isEmpty())
+        fstab += "UUID=" + homeFilesystemUuid.toLatin1() + " /home f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
+    else
+        fstab += "/dev/mapper/nx_home /home f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
+    if (varLuks.isEmpty())
+        fstab += "UUID=" + varFilesystemUuid.toLatin1() + " /var/lib f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
+    else
+        fstab += "/dev/mapper/nx_var_lib /var/lib f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
     if (!error->isEmpty()) return false;
 
     if (plan.swapChoice == SwapChoice::File) {
@@ -339,7 +341,9 @@ bool applyConfig(const InstallationPlan& plan, const QString& root, const QStrin
     }
     QByteArray lines = localeFile.readAll();
     const QByteArray selectedLocale = plan.locale.toUtf8();
-    if (!lines.contains(selectedLocale + " "))
+    QByteArray selectedLocalePrefix = selectedLocale;
+    selectedLocalePrefix.append(' ');
+    if (!lines.contains(selectedLocalePrefix))
         lines += selectedLocale + " UTF-8\n";
     else {
         const QList<QByteArray> sourceLines = lines.split('\n');

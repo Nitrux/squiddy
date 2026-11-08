@@ -41,7 +41,8 @@ int main(int argc, char* argv[])
                      QStringLiteral("A Nitrux installer built with MauiKit."),
                      KAboutLicense::BSD_3_Clause,
                      QStringLiteral("© %1 Made by Nitrux | Built with MauiKit")
-                         .arg(QDate::currentDate().year()));
+                         .arg(QDate::currentDate().year()),
+                     QString::fromUtf8(GIT_BRANCH) + QStringLiteral("/") + QString::fromUtf8(GIT_COMMIT_HASH));
 
     about.addAuthor(QStringLiteral("Uri Herrera"),
                     QStringLiteral("Developer"),

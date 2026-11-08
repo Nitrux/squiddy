@@ -23,12 +23,13 @@ if [[ "$target_arch" != "$(dpkg --print-architecture)" ]]; then
     exit 2
 fi
 
+rm -rf "$cmake_build_dir"
 mkdir -p "$cmake_build_dir" "$build_dir"
 cmake -S "$repo_root" -B "$cmake_build_dir" \
     -DCMAKE_INSTALL_PREFIX=/usr \
-    -DCMAKE_INSTALL_LIBDIR="lib/$host_multiarch" \
-    -DCMAKE_INSTALL_SYSCONFDIR=/etc \
-    -DCMAKE_INSTALL_LOCALSTATEDIR=/var \
+    -DKDE_INSTALL_LIBDIR="lib/$host_multiarch" \
+    -DKDE_INSTALL_SYSCONFDIR=/etc \
+    -DKDE_INSTALL_LOCALSTATEDIR=/var \
     -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON \
     -DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON \
     -DCMAKE_BUILD_TYPE=Release \

@@ -196,7 +196,7 @@ public:
     Q_INVOKABLE void runStoragePreflight();
     void acceptStoragePreflightResult(const StoragePreflightResult& result);
 
-signals:
+Q_SIGNALS:
     void planChanged();
     void choicesChanged();
 

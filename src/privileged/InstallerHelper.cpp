@@ -7,8 +7,6 @@
 #include "../SystemDiscovery.h"
 #include "InstallationExecutor.h"
 
-#include <polkit/polkit.h>
-
 #include <QDBusError>
 #include <QDBusConnectionInterface>
 #include <QDBusReply>
@@ -21,6 +19,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QUuid>
+
+#include <polkit/polkit.h>
 
 #include <utility>
 #include <pwd.h>
@@ -465,7 +465,7 @@ QString InstallerHelper::SubmitPlan(const QString& token, const QVariantMap& pay
                 return;
             QMetaObject::invokeMethod(self.data(), [self, update] {
                 if (self)
-                    emit self->InstallationProgressChanged(update.percent, update.phase, update.detail, false, false);
+                    Q_EMIT self->InstallationProgressChanged(update.percent, update.phase, update.detail, false, false);
             }, Qt::QueuedConnection);
         }, &error);
         if (!self)
@@ -473,7 +473,7 @@ QString InstallerHelper::SubmitPlan(const QString& token, const QVariantMap& pay
         QMetaObject::invokeMethod(self.data(), [self, success, error] {
             if (self) {
                 self->m_installationActive = false;
-                emit self->InstallationProgressChanged(success ? 100 : 0,
+                Q_EMIT self->InstallationProgressChanged(success ? 100 : 0,
                     success ? QObject::tr("Complete") : QObject::tr("Failed"),
                     success ? QObject::tr("Nitrux was installed successfully.") : error, true, success);
             }

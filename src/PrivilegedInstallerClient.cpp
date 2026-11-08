@@ -64,7 +64,7 @@ void PrivilegedInstallerClient::beginInstall()
     m_progressDetail.clear();
     m_progressLog.clear();
     setStatusMessage(tr("Requesting authorization…"));
-    emit statusChanged();
+    Q_EMIT statusChanged();
 
     auto* interface = new QDBusInterface(serviceName, objectPath, interfaceName,
                                           QDBusConnection::systemBus(), this);
@@ -133,7 +133,7 @@ void PrivilegedInstallerClient::receiveProgress(int percent, const QString& phas
         m_installationSucceeded = success;
         setStatusMessage(success ? tr("Installation completed.") : tr("Installation stopped: %1").arg(detail));
     }
-    emit statusChanged();
+    Q_EMIT statusChanged();
 }
 
 void PrivilegedInstallerClient::setStatusMessage(const QString& message)
@@ -141,5 +141,5 @@ void PrivilegedInstallerClient::setStatusMessage(const QString& message)
     if (m_statusMessage == message && !m_busy)
         return;
     m_statusMessage = message;
-    emit statusChanged();
+    Q_EMIT statusChanged();
 }

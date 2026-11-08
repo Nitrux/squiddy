@@ -36,10 +36,10 @@ public:
 
     Q_INVOKABLE void beginInstall();
 
-signals:
+Q_SIGNALS:
     void statusChanged();
 
-private slots:
+private Q_SLOTS:
     void receiveProgress(int percent, const QString& phase, const QString& detail,
                          bool finished, bool success);
 

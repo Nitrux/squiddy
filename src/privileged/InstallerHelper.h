@@ -18,11 +18,11 @@ class InstallerHelper final : public QObject, protected QDBusContext
 public:
     explicit InstallerHelper(QObject* parent = nullptr);
 
-public slots:
+public Q_SLOTS:
     QString AuthorizeInstall();
     QString SubmitPlan(const QString& token, const QVariantMap& payload);
 
-signals:
+Q_SIGNALS:
     void InstallationProgressChanged(int percent, const QString& phase, const QString& detail,
                                     bool finished, bool success);
 

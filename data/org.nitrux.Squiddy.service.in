@@ -1,4 +1,4 @@
 [D-BUS Service]
 Name=org.nitrux.Squiddy
-Exec=@CMAKE_INSTALL_FULL_LIBEXECDIR@/squiddy-installer-helper
+Exec=@KDE_INSTALL_FULL_LIBEXECDIR@/squiddy-installer-helper
 User=root

@@ -1,5 +1,5 @@
 set(_squiddy_install_prefix "@CMAKE_INSTALL_PREFIX@")
-set(_squiddy_install_bindir "@CMAKE_INSTALL_BINDIR@")
+set(_squiddy_install_bindir "@KDE_INSTALL_BINDIR@")
 
 if(IS_ABSOLUTE "${_squiddy_install_bindir}")
     set(_squiddy_install_path "${_squiddy_install_bindir}/squiddy")
@@ -11,7 +11,7 @@ if(DEFINED ENV{DESTDIR} AND NOT "$ENV{DESTDIR}" STREQUAL "")
     set(_squiddy_install_path "$ENV{DESTDIR}${_squiddy_install_path}")
 endif()
 
-cmake_path(NORMAL_PATH _squiddy_install_path)
+get_filename_component(_squiddy_install_path "${_squiddy_install_path}" ABSOLUTE)
 
 if(EXISTS "${_squiddy_install_path}" OR IS_SYMLINK "${_squiddy_install_path}")
     file(REMOVE "${_squiddy_install_path}")
