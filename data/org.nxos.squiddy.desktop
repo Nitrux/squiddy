@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Nitrux Installer
+Comment=Install Nitrux on this computer
+Exec=squiddy
+Icon=system-software-install
+Terminal=false
+Type=Application
+Categories=System;
+StartupNotify=true

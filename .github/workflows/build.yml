@@ -1,0 +1,89 @@
+name: Squiddy Debian Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      packageCloudRepo:
+        description: PackageCloud repository
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+      packageVersion:
+        description: Debian package version
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+            image: debian:stable-20260713
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+            image: arm64v8/debian:stable-20260713
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+      env:
+        DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Install CA certificates
+        run: apt-get update && apt-get install -y ca-certificates
+
+      - name: Divert the logger during the APT transition
+        run: dpkg-divert --package util-linux --no-rename --add /usr/bin/logger
+
+      - name: Configure the Debian snapshot
+        run: |
+          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10no-check-valid-until
+          cat > /etc/apt/sources.list.d/debian.sources <<EOF_SOURCES
+          Types: deb
+          URIs: https://snapshot.debian.org/archive/debian/20261013T082854Z
+          Suites: testing testing-updates
+          Components: main non-free non-free-firmware contrib
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          Architectures: ${{ matrix.architecture }}
+          EOF_SOURCES
+          apt-get update
+          apt-get -o Dpkg::Options::=--force-overwrite full-upgrade -y
+
+      - name: Install packaging tools
+        run: apt-get install -y build-essential devscripts dpkg-dev git gnupg lintian ruby-full sudo
+
+      - name: Check out Squiddy
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: ./scripts/install-build-deps.sh
+
+      - name: Build Debian package
+        run: ./scripts/build-deb.sh
+        env:
+          PACKAGE_VERSION: ${{ inputs.packageVersion }}
+          TARGET_ARCH: ${{ matrix.architecture }}
+
+      - name: Lint Debian package
+        run: lintian build/*.deb
+
+      - name: Upload Debian package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: squiddy-deb-${{ matrix.architecture }}
+          path: build/*.deb
+          if-no-files-found: error
+
+      - name: Publish to PackageCloud
+        run: gem install package_cloud && package_cloud push "nitrux/${PACKAGECLOUD_REPO}/debian/duke" build/*.deb
+        env:
+          PACKAGECLOUD_REPO: ${{ inputs.packageCloudRepo }}
+          PACKAGECLOUD_TOKEN: ${{ secrets.PACKAGECLOUD_TOKEN }}

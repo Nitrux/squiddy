@@ -1,0 +1,18 @@
+set(_squiddy_install_prefix "@CMAKE_INSTALL_PREFIX@")
+set(_squiddy_install_bindir "@CMAKE_INSTALL_BINDIR@")
+
+if(IS_ABSOLUTE "${_squiddy_install_bindir}")
+    set(_squiddy_install_path "${_squiddy_install_bindir}/squiddy")
+else()
+    set(_squiddy_install_path "${_squiddy_install_prefix}/${_squiddy_install_bindir}/squiddy")
+endif()
+
+if(DEFINED ENV{DESTDIR} AND NOT "$ENV{DESTDIR}" STREQUAL "")
+    set(_squiddy_install_path "$ENV{DESTDIR}${_squiddy_install_path}")
+endif()
+
+cmake_path(NORMAL_PATH _squiddy_install_path)
+
+if(EXISTS "${_squiddy_install_path}" OR IS_SYMLINK "${_squiddy_install_path}")
+    file(REMOVE "${_squiddy_install_path}")
+endif()
