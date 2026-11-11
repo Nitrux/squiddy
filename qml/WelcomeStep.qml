@@ -149,179 +149,239 @@ ColumnLayout {
         }
     }
 
-    Maui.FlexSectionItem {
+    Rectangle {
         Layout.fillWidth: true
-        flat: true
-        label1.text: qsTr("More languages")
-        label2.text: welcomeStep.moreLanguagesVisible
-            ? qsTr("Selected language: %1").arg(installationPlan.language)
-            : qsTr("Choose from all available languages.")
-        label2.wrapMode: Text.Wrap
+        color: Maui.Theme.alternateBackgroundColor
+        radius: Maui.Style.radiusV
+        border.color: Maui.Theme.backgroundColor
+        implicitHeight: moreLanguagesCardLayout.implicitHeight + Maui.Style.contentMargins * 2
 
-        template.content: Switch {
-            checked: welcomeStep.moreLanguagesVisible
-            onToggled: {
-                const currentCard = welcomeStep.featuredLanguages.find(
-                    choice => choice.value === installationPlan.language)
-                if (checked && currentCard)
-                    welcomeStep.lastFeaturedLanguage = currentCard.value
-                if (!checked) {
-                    const fallback = currentCard ? currentCard.value
-                        : (welcomeStep.lastFeaturedLanguage
-                            || (welcomeStep.featuredLanguages.length > 0
-                                ? welcomeStep.featuredLanguages[0].value : ""))
-                    if (fallback) {
-                        const card = welcomeStep.featuredLanguages.find(choice => choice.value === fallback)
-                        if (card && (!currentCard || (card.locale && card.locale !== installationPlan.locale)))
-                            installationPlan.selectLanguage(fallback, card.locale)
+        ColumnLayout {
+            id: moreLanguagesCardLayout
+            anchors.fill: parent
+            anchors.margins: Maui.Style.contentMargins
+            spacing: Maui.Style.space.small
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                flat: true
+                label1.text: qsTr("More languages")
+                label2.text: welcomeStep.moreLanguagesVisible
+                    ? qsTr("Selected language: %1").arg(installationPlan.language)
+                    : qsTr("Choose from all available languages.")
+                label2.wrapMode: Text.Wrap
+
+                template.content: Switch {
+                    checked: welcomeStep.moreLanguagesVisible
+                    onToggled: {
+                        const currentCard = welcomeStep.featuredLanguages.find(
+                            choice => choice.value === installationPlan.language)
+                        if (checked && currentCard)
+                            welcomeStep.lastFeaturedLanguage = currentCard.value
+                        if (!checked) {
+                            const fallback = currentCard ? currentCard.value
+                                : (welcomeStep.lastFeaturedLanguage
+                                    || (welcomeStep.featuredLanguages.length > 0
+                                        ? welcomeStep.featuredLanguages[0].value : ""))
+                            if (fallback) {
+                                const card = welcomeStep.featuredLanguages.find(choice => choice.value === fallback)
+                                if (card && (!currentCard || (card.locale && card.locale !== installationPlan.locale)))
+                                    installationPlan.selectLanguage(fallback, card.locale)
+                            }
+                        }
+                        welcomeStep.moreLanguagesVisible = checked
                     }
                 }
-                welcomeStep.moreLanguagesVisible = checked
+            }
+
+            Button {
+                visible: welcomeStep.moreLanguagesVisible
+                text: qsTr("Choose a language")
+                onClicked: languageDialog.open()
             }
         }
     }
 
-    Button {
-        visible: welcomeStep.moreLanguagesVisible
-        text: qsTr("Choose a language")
-        onClicked: languageDialog.open()
-    }
-
-    Maui.SectionHeader {
+    Rectangle {
         Layout.fillWidth: true
-        text1: qsTr("Locale and regional formats")
-        text2: qsTr("Choose the locale for the installed system")
-    }
+        color: Maui.Theme.alternateBackgroundColor
+        radius: Maui.Style.radiusV
+        border.color: Maui.Theme.backgroundColor
+        implicitHeight: localeCardLayout.implicitHeight + Maui.Style.contentMargins * 2
 
-    ComboBox {
-        Layout.fillWidth: true
-        model: installationPlan.availableLocales
-        currentIndex: installationPlan.availableLocales.indexOf(installationPlan.locale)
-        displayText: currentIndex >= 0 ? currentText : qsTr("No supported locales were found on the live system")
-        onActivated: {
-            installationPlan.markRegionalSettingsChanged()
-            installationPlan.locale = currentText
-        }
-        popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
-        popupScrollBar: true
-    }
+        ColumnLayout {
+            id: localeCardLayout
+            anchors.fill: parent
+            anchors.margins: Maui.Style.contentMargins
+            spacing: Maui.Style.space.small
 
-    GridLayout {
-        Layout.fillWidth: true
-        columns: 2
-        uniformCellWidths: true
-        columnSpacing: Maui.Style.space.medium
-        rowSpacing: Maui.Style.space.small
+            Maui.SectionHeader {
+                Layout.fillWidth: true
+                text1: qsTr("Locale and regional formats")
+                text2: qsTr("Choose the locale for the installed system.")
+            }
 
-        Maui.SectionHeader {
-            Layout.fillWidth: true
-            text1: qsTr("Country")
-            text2: qsTr("Choose the time zone region for the installed system")
-        }
-
-        Maui.SectionHeader {
-            Layout.fillWidth: true
-            text1: qsTr("City")
-            text2: qsTr("Choose a location or time zone in the selected region")
-        }
-
-        ComboBox {
-            id: timeZoneRegionCombo
-            Layout.fillWidth: true
-            model: installationPlan.timeZoneRegionOptions
-            textRole: "text"
-            valueRole: "value"
-            currentIndex: {
-                for (let index = 0; index < model.length; ++index) {
-                    if (model[index].value === installationPlan.timeZoneRegion)
-                        return index
+            ComboBox {
+                Layout.fillWidth: true
+                model: installationPlan.availableLocales
+                currentIndex: installationPlan.availableLocales.indexOf(installationPlan.locale)
+                displayText: currentIndex >= 0 ? currentText : qsTr("No supported locales were found on the live system.")
+                onActivated: {
+                    installationPlan.markRegionalSettingsChanged()
+                    installationPlan.locale = currentText
                 }
-                return -1
+                popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
+                popupScrollBar: true
             }
-            displayText: currentIndex >= 0 ? currentText : qsTr("No time zone regions were found")
-            onActivated: {
-                if (currentValue !== installationPlan.timeZoneRegion) {
-                    const zones = installationPlan.timeZoneOptionsForRegion(currentValue)
-                    if (zones.length > 0) {
+        }
+    }
+
+    Rectangle {
+        Layout.fillWidth: true
+        color: Maui.Theme.alternateBackgroundColor
+        radius: Maui.Style.radiusV
+        border.color: Maui.Theme.backgroundColor
+        implicitHeight: timeZoneCardLayout.implicitHeight + Maui.Style.contentMargins * 2
+
+        ColumnLayout {
+            id: timeZoneCardLayout
+            anchors.fill: parent
+            anchors.margins: Maui.Style.contentMargins
+            spacing: Maui.Style.space.small
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                uniformCellWidths: true
+                columnSpacing: Maui.Style.space.medium
+                rowSpacing: Maui.Style.space.small
+
+                Maui.SectionHeader {
+                    Layout.fillWidth: true
+                    text1: qsTr("Country")
+                    text2: qsTr("Choose the time zone region for the installed system.")
+                }
+
+                Maui.SectionHeader {
+                    Layout.fillWidth: true
+                    text1: qsTr("City")
+                    text2: qsTr("Choose a location or time zone in the selected region.")
+                }
+
+                ComboBox {
+                    id: timeZoneRegionCombo
+                    Layout.fillWidth: true
+                    model: installationPlan.timeZoneRegionOptions
+                    textRole: "text"
+                    valueRole: "value"
+                    currentIndex: {
+                        for (let index = 0; index < model.length; ++index) {
+                            if (model[index].value === installationPlan.timeZoneRegion)
+                                return index
+                        }
+                        return -1
+                    }
+                    displayText: currentIndex >= 0 ? currentText : qsTr("No time zone regions were found.")
+                    onActivated: {
+                        if (currentValue !== installationPlan.timeZoneRegion) {
+                            const zones = installationPlan.timeZoneOptionsForRegion(currentValue)
+                            if (zones.length > 0) {
+                                installationPlan.markRegionalSettingsChanged()
+                                installationPlan.timeZone = zones[0].value
+                            }
+                        }
+                    }
+                    popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
+                    popupScrollBar: true
+                    delegate: MenuItem {
+                        width: ListView.view.width
+                        text: timeZoneRegionCombo.model[index].text
+                        highlighted: timeZoneRegionCombo.highlightedIndex === index
+                    }
+                }
+
+                ComboBox {
+                    id: timeZoneCityCombo
+                    Layout.fillWidth: true
+                    model: installationPlan.timeZoneOptionsForRegion(installationPlan.timeZoneRegion)
+                    textRole: "text"
+                    valueRole: "value"
+                    currentIndex: {
+                        for (let index = 0; index < model.length; ++index) {
+                            if (model[index].value === installationPlan.timeZone)
+                                return index
+                        }
+                        return -1
+                    }
+                    displayText: currentIndex >= 0 ? currentText : qsTr("No time zones were found in this region.")
+                    onActivated: {
                         installationPlan.markRegionalSettingsChanged()
-                        installationPlan.timeZone = zones[0].value
+                        installationPlan.timeZone = currentValue
+                    }
+                    popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
+                    popupScrollBar: true
+                    delegate: MenuItem {
+                        width: ListView.view.width
+                        text: timeZoneCityCombo.model[index].text
+                        highlighted: timeZoneCityCombo.highlightedIndex === index
                     }
                 }
             }
-            popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
-            popupScrollBar: true
-            delegate: MenuItem {
-                width: ListView.view.width
-                text: timeZoneRegionCombo.model[index].text
-                highlighted: timeZoneRegionCombo.highlightedIndex === index
-            }
         }
+    }
 
-        ComboBox {
-            id: timeZoneCityCombo
-            Layout.fillWidth: true
-            model: installationPlan.timeZoneOptionsForRegion(installationPlan.timeZoneRegion)
-            textRole: "text"
-            valueRole: "value"
-            currentIndex: {
-                for (let index = 0; index < model.length; ++index) {
-                    if (model[index].value === installationPlan.timeZone)
-                        return index
+    Rectangle {
+        Layout.fillWidth: true
+        color: Maui.Theme.alternateBackgroundColor
+        radius: Maui.Style.radiusV
+        border.color: Maui.Theme.backgroundColor
+        implicitHeight: keyboardCardLayout.implicitHeight + Maui.Style.contentMargins * 2
+
+        ColumnLayout {
+            id: keyboardCardLayout
+            anchors.fill: parent
+            anchors.margins: Maui.Style.contentMargins
+            spacing: Maui.Style.space.small
+
+            Maui.SectionHeader {
+                Layout.fillWidth: true
+                text1: qsTr("Keyboard layout")
+                text2: qsTr("Choose the layout for the installed system.")
+            }
+
+            ComboBox {
+                id: keyboardLayoutCombo
+                Layout.fillWidth: true
+                model: installationPlan.keyboardLayoutOptions
+                textRole: "text"
+                valueRole: "value"
+                currentIndex: installationPlan.availableKeyboardLayouts.indexOf(installationPlan.keyboardLayout)
+                displayText: currentIndex >= 0 ? currentText : qsTr("No keyboard layouts were found on the live system.")
+                onActivated: {
+                    installationPlan.markRegionalSettingsChanged()
+                    installationPlan.keyboardLayout = currentValue
                 }
-                return -1
+                popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
+                popupScrollBar: true
+                delegate: MenuItem {
+                    width: ListView.view.width
+                    text: installationPlan.keyboardLayoutOptions[index].text
+                    highlighted: keyboardLayoutCombo.highlightedIndex === index
+                }
             }
-            displayText: currentIndex >= 0 ? currentText : qsTr("No time zones were found in this region")
-            onActivated: {
-                installationPlan.markRegionalSettingsChanged()
-                installationPlan.timeZone = currentValue
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                flat: true
+                label1.text: qsTr("Advanced keyboard configuration")
+                label2.text: qsTr("Choose an optional variant, model, or keyboard options.")
+                label2.wrapMode: Text.Wrap
+
+                template.content: Switch {
+                    checked: welcomeStep.advancedKeyboardVisible
+                    onToggled: welcomeStep.advancedKeyboardVisible = checked
+                }
             }
-            popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
-            popupScrollBar: true
-            delegate: MenuItem {
-                width: ListView.view.width
-                text: timeZoneCityCombo.model[index].text
-                highlighted: timeZoneCityCombo.highlightedIndex === index
-            }
-        }
-    }
-
-    Maui.SectionHeader {
-        Layout.fillWidth: true
-        text1: qsTr("Keyboard layout")
-        text2: qsTr("Choose the layout for the installed system")
-    }
-
-    ComboBox {
-        id: keyboardLayoutCombo
-        Layout.fillWidth: true
-        model: installationPlan.keyboardLayoutOptions
-        textRole: "text"
-        valueRole: "value"
-        currentIndex: installationPlan.availableKeyboardLayouts.indexOf(installationPlan.keyboardLayout)
-        displayText: currentIndex >= 0 ? currentText : qsTr("No keyboard layouts were found on the live system")
-        onActivated: {
-            installationPlan.markRegionalSettingsChanged()
-            installationPlan.keyboardLayout = currentValue
-        }
-        popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
-        popupScrollBar: true
-        delegate: MenuItem {
-            width: ListView.view.width
-            text: installationPlan.keyboardLayoutOptions[index].text
-            highlighted: keyboardLayoutCombo.highlightedIndex === index
-        }
-    }
-
-    Maui.FlexSectionItem {
-        Layout.fillWidth: true
-        flat: true
-        label1.text: qsTr("Advanced keyboard configuration")
-        label2.text: qsTr("Choose an optional variant, model, or keyboard options.")
-        label2.wrapMode: Text.Wrap
-
-        template.content: Switch {
-            checked: welcomeStep.advancedKeyboardVisible
-            onToggled: welcomeStep.advancedKeyboardVisible = checked
         }
     }
 
