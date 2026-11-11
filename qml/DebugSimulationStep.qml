@@ -39,8 +39,8 @@ StepCard {
 
     Maui.SectionHeader {
         Layout.fillWidth: true
-        text1: qsTr("Simulated installation")
-        text2: qsTr("Advance through the installer phases without executing them.")
+        text1: qsTr("Simulated Installation")
+        text2: qsTr("Preview the installation phases without making changes.")
         label2.wrapMode: Text.Wrap
     }
 

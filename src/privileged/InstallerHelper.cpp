@@ -92,8 +92,13 @@ QString validatePayload(const QVariantMap& payload, InstallationPlan* outputPlan
         QStringLiteral("acknowledgeDiskErasure"),
         QStringLiteral("userShell"), QStringLiteral("userGroups"),
         QStringLiteral("automaticLogin"), QStringLiteral("allowWeakPassword"),
-        QStringLiteral("targetDevice"), QStringLiteral("partitioningMode"),
-        QStringLiteral("swapChoice"), QStringLiteral("partitions"),
+        QStringLiteral("targetDevice"), QStringLiteral("manualAssignments"),
+        QStringLiteral("manualPartitionLayout"),
+        QStringLiteral("partitionLabels"), QStringLiteral("partitionSizesMiB"),
+        QStringLiteral("sharedSpaceMiB"), QStringLiteral("sharedSpaceStartSector"),
+        QStringLiteral("sharedResizeDevice"),
+        QStringLiteral("partitioningMode"),
+        QStringLiteral("swapChoice"), QStringLiteral("encryptSwap"), QStringLiteral("partitions"),
         QStringLiteral("efiMountPoint"), QStringLiteral("efiRecommendedSizeMiB"),
         QStringLiteral("storageLayout"), QStringLiteral("targetDiskBytes"),
         QStringLiteral("logicalBlockSize")
@@ -182,8 +187,41 @@ QString validatePayload(const QVariantMap& payload, InstallationPlan* outputPlan
         || !discovered.targetDisks.contains(targetDevice))
         return QObject::tr("The plan no longer matches the live system discovery results.");
 
-    if (partitioningMode != QStringLiteral("automated"))
-        return QObject::tr("Manual partition plans are not supported yet.");
+    if (partitioningMode != QStringLiteral("automated")
+        && partitioningMode != QStringLiteral("share")
+        && partitioningMode != QStringLiteral("manual"))
+        return QObject::tr("The partitioning mode is invalid.");
+    if (!hasType(payload, QStringLiteral("manualAssignments"), QMetaType::QVariantMap)
+        || !hasType(payload, QStringLiteral("manualPartitionLayout"), QMetaType::QVariantList)
+        || !hasType(payload, QStringLiteral("partitionLabels"), QMetaType::QVariantMap)
+        || !hasType(payload, QStringLiteral("partitionSizesMiB"), QMetaType::QVariantMap)
+        || !hasType(payload, QStringLiteral("sharedSpaceMiB"), QMetaType::ULongLong)
+        || !hasType(payload, QStringLiteral("sharedSpaceStartSector"), QMetaType::ULongLong)
+        || !hasType(payload, QStringLiteral("sharedResizeDevice"), QMetaType::QString))
+        return QObject::tr("The storage selections are malformed.");
+    const QVariantMap assignments = payload.value(QStringLiteral("manualAssignments")).toMap();
+    const QVariantList manualLayout = payload.value(QStringLiteral("manualPartitionLayout")).toList();
+    const QVariantMap labels = payload.value(QStringLiteral("partitionLabels")).toMap();
+    const QVariantMap sizes = payload.value(QStringLiteral("partitionSizesMiB")).toMap();
+    const quint64 sharedSpaceMiB = payload.value(QStringLiteral("sharedSpaceMiB")).toULongLong();
+    const quint64 sharedSpaceStartSector = payload.value(QStringLiteral("sharedSpaceStartSector")).toULongLong();
+    const QString sharedResizeDevice = payload.value(QStringLiteral("sharedResizeDevice")).toString();
+    static const QStringList roles = {QStringLiteral("/boot/efi"), QStringLiteral("/"),
+        QStringLiteral("/home"), QStringLiteral("/var/lib"), QStringLiteral("swap")};
+    if (labels.size() != roles.size())
+        return QObject::tr("The partition labels are malformed.");
+    for (const QString& role : roles) {
+        if (!labels.contains(role) || labels.value(role).metaType().id() != QMetaType::QString)
+            return QObject::tr("The partition labels are malformed.");
+    }
+    for (auto it = assignments.cbegin(); it != assignments.cend(); ++it) {
+        if (it.value().metaType().id() != QMetaType::QString || !roles.contains(it.value().toString()))
+            return QObject::tr("A manual partition assignment is malformed.");
+    }
+    for (auto it = sizes.cbegin(); it != sizes.cend(); ++it) {
+        if (!roles.contains(it.key()) || it.value().metaType().id() != QMetaType::ULongLong)
+            return QObject::tr("A partition size is malformed.");
+    }
     if (userShell != QStringLiteral("/bin/zsh") || efiMountPoint != QStringLiteral("/boot/efi"))
         return QObject::tr("The plan does not match the configured Nitrux defaults.");
 
@@ -226,6 +264,10 @@ QString validatePayload(const QVariantMap& payload, InstallationPlan* outputPlan
         || !SystemDiscovery::isSuitableTargetDisk(targetDevice, imagePath))
         return QObject::tr("The selected target failed the read-only disk preflight.");
 
+    bool encryptSwap = false;
+    if (!readBool(payload, QStringLiteral("encryptSwap"), &encryptSwap))
+        return QObject::tr("The swap encryption setting is malformed.");
+
     const QVariant partitionsValue = payload.value(QStringLiteral("partitions"));
     if (partitionsValue.metaType().id() != QMetaType::QVariantList)
         return QObject::tr("The partition layout is malformed.");
@@ -253,6 +295,16 @@ QString validatePayload(const QVariantMap& payload, InstallationPlan* outputPlan
     validator.setHostname(hostname);
     validator.setTargetDisk(targetDevice);
     validator.setPartitioningMode(partitioningMode);
+    for (auto it = assignments.cbegin(); it != assignments.cend(); ++it)
+        validator.setManualAssignment(it.key(), it.value().toString());
+    validator.setManualPartitionLayout(manualLayout);
+    for (auto it = labels.cbegin(); it != labels.cend(); ++it)
+        validator.setPartitionLabel(it.key(), it.value().toString());
+    for (auto it = sizes.cbegin(); it != sizes.cend(); ++it)
+        validator.setPartitionSizeMiB(it.key(), it.value().toULongLong());
+    validator.setSharedSpaceStartSector(sharedSpaceStartSector);
+    validator.setSharedSpaceMiB(sharedSpaceMiB);
+    validator.setSharedResizeDevice(sharedResizeDevice);
     validator.setSwapChoice(swapChoice);
     validator.setAutomaticLogin(automaticLogin);
     validator.setAllowWeakPassword(allowWeakPassword);
@@ -262,9 +314,11 @@ QString validatePayload(const QVariantMap& payload, InstallationPlan* outputPlan
     validator.setEncryptionPassphraseConfirmation(encryptionConfirmation.toString());
     validator.setAcknowledgeDiskErasure(acknowledgeDiskErasure);
 
+    const QVariantMap root = partitions.at(0).toMap();
     const QVariantMap home = partitions.at(1).toMap();
     const QVariantMap varLib = partitions.at(2).toMap();
-    if (!hasType(home, QStringLiteral("encrypted"), QMetaType::Bool)
+    if (!hasType(root, QStringLiteral("encrypted"), QMetaType::Bool)
+        || !hasType(home, QStringLiteral("encrypted"), QMetaType::Bool)
         || !hasType(varLib, QStringLiteral("encrypted"), QMetaType::Bool))
         return QObject::tr("The encryption settings are malformed.");
     if (!hasType(payload, QStringLiteral("storageLayout"), QMetaType::QVariantList)
@@ -275,15 +329,20 @@ QString validatePayload(const QVariantMap& payload, InstallationPlan* outputPlan
     const QVariantList submittedStorageLayout = payload.value(QStringLiteral("storageLayout")).toList();
     const StoragePreflightResult storage = SystemDiscovery::preflightStorage(
         targetDevice, imagePath, imageFormat, swapChoice,
+        root.value(QStringLiteral("encrypted")).toBool(),
         home.value(QStringLiteral("encrypted")).toBool(),
-        varLib.value(QStringLiteral("encrypted")).toBool());
+        varLib.value(QStringLiteral("encrypted")).toBool(),
+        encryptSwap, partitioningMode,
+        assignments, manualLayout, labels, sizes, sharedSpaceMiB, sharedSpaceStartSector, sharedResizeDevice);
     if (!storage.valid
         || submittedStorageLayout != storage.layout
         || payload.value(QStringLiteral("targetDiskBytes")).toULongLong() != storage.diskBytes
         || payload.value(QStringLiteral("logicalBlockSize")).toULongLong() != storage.logicalBlockSize)
         return QObject::tr("The selected disk or image no longer matches the approved storage preflight.");
+    validator.setEncryptRoot(root.value(QStringLiteral("encrypted")).toBool());
     validator.setEncryptHome(home.value(QStringLiteral("encrypted")).toBool());
     validator.setEncryptVarLib(varLib.value(QStringLiteral("encrypted")).toBool());
+    validator.setEncryptSwap(encryptSwap);
     validator.acceptStoragePreflightResult(storage);
 
     if (!validator.validateAndBuildPlan())

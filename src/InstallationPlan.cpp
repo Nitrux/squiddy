@@ -10,6 +10,7 @@
 #include <QByteArray>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
 #include <QLocale>
 #include <QMap>
 #include <QRegularExpression>
@@ -218,6 +219,39 @@ QVariantList InstallationPlanController::keyboardVariantOptions() const
 QVariantList InstallationPlanController::keyboardModelOptions() const { return m_keyboardModelOptions; }
 QVariantList InstallationPlanController::keyboardOptionOptions() const { return m_keyboardOptionOptions; }
 QStringList InstallationPlanController::availableTargetDisks() const { return m_availableTargetDisks; }
+QString InstallationPlanController::diskDisplayName(const QString& devicePath) const
+{
+    const QString diskName = QFileInfo(devicePath).fileName();
+    const QString basePath = QStringLiteral("/sys/class/block/") + diskName + QStringLiteral("/device/");
+    const auto readName = [](const QString& path) {
+        QFile file(path);
+        return file.open(QIODevice::ReadOnly | QIODevice::Text)
+            ? QString::fromUtf8(file.readAll()).simplified() : QString();
+    };
+    QString model = readName(basePath + QStringLiteral("model"));
+    QString vendor = readName(basePath + QStringLiteral("vendor"));
+    if (model.isEmpty()) {
+        const QString numbers = readName(QStringLiteral("/sys/class/block/") + diskName
+            + QStringLiteral("/dev"));
+        QFile udev(QStringLiteral("/run/udev/data/b") + numbers);
+        if (!numbers.isEmpty() && udev.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QStringList lines = QString::fromUtf8(udev.readAll()).split(QLatin1Char('\n'));
+            for (const QString& line : lines) {
+                if (line.startsWith(QStringLiteral("E:ID_MODEL_FROM_DATABASE=")))
+                    model = line.mid(25).simplified();
+                else if (line.startsWith(QStringLiteral("E:ID_MODEL=")) && model.isEmpty())
+                    model = line.mid(11).replace(QLatin1Char('_'), QLatin1Char(' ')).simplified();
+                else if (line.startsWith(QStringLiteral("E:ID_VENDOR_FROM_DATABASE=")) && vendor.isEmpty())
+                    vendor = line.mid(26).simplified();
+            }
+        }
+    }
+    if (!model.isEmpty())
+        return vendor.isEmpty() || model.startsWith(vendor, Qt::CaseInsensitive)
+            ? model : QStringLiteral("%1 %2").arg(vendor, model);
+    return vendor.isEmpty() ? diskName : QStringLiteral("%1 %2").arg(vendor, diskName);
+}
+
 
 void InstallationPlanController::setAvailableLanguages(const QStringList& choices)
 {
@@ -531,6 +565,104 @@ void InstallationPlanController::setTargetDisk(const QString& value)
 {
     if (m_targetDisk == value) return;
     m_targetDisk = value;
+    m_acknowledgeDiskErasure = false;
+    m_targetDiskInfo = SystemDiscovery::inspectTargetDisk(value, m_imagePath);
+    m_manualAssignments.clear();
+    m_manualPartitionLayout.clear();
+    m_sharedSpaceMiB = 0;
+    m_sharedSpaceStartSector = 0;
+    m_sharedResizeDevice.clear();
+    if (m_partitioningMode != QStringLiteral("automated")
+        && !m_targetDiskInfo.value(QStringLiteral("gpt")).toBool())
+        m_partitioningMode = QStringLiteral("automated");
+    if (m_partitioningMode == QStringLiteral("automated") && m_swapChoice == QStringLiteral("None"))
+        m_swapChoice = QStringLiteral("Small");
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+
+QVariantMap InstallationPlanController::targetDiskInfo() const { return m_targetDiskInfo; }
+QVariantMap InstallationPlanController::manualAssignments() const { return m_manualAssignments; }
+QVariantList InstallationPlanController::manualPartitionLayout() const { return m_manualPartitionLayout; }
+void InstallationPlanController::setManualPartitionLayout(const QVariantList& layout)
+{
+    if (m_manualPartitionLayout == layout) return;
+    m_manualPartitionLayout = layout;
+    m_manualAssignments.clear();
+    m_encryptRoot = false;
+    m_encryptHome = false;
+    m_encryptVarLib = false;
+    m_encryptSwap = false;
+    for (const QVariant& value : layout) {
+        const QVariantMap row = value.toMap();
+        const QString role = row.value(QStringLiteral("mountPoint")).toString();
+        const QString device = row.value(QStringLiteral("device")).toString();
+        if (role.isEmpty() || device.isEmpty() || row.value(QStringLiteral("action")).toString() == QStringLiteral("delete"))
+            continue;
+        m_manualAssignments.insert(device, role);
+        if (role == QStringLiteral("/")) m_encryptRoot = row.value(QStringLiteral("encrypted")).toBool();
+        else if (role == QStringLiteral("/home")) m_encryptHome = row.value(QStringLiteral("encrypted")).toBool();
+        else if (role == QStringLiteral("/var/lib")) m_encryptVarLib = row.value(QStringLiteral("encrypted")).toBool();
+        else if (role == QStringLiteral("swap")) m_encryptSwap = row.value(QStringLiteral("encrypted")).toBool();
+        m_partitionLabels.insert(role, row.value(QStringLiteral("filesystemLabel")).toString());
+    }
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+QVariantMap InstallationPlanController::partitionLabels() const { return m_partitionLabels; }
+QVariantMap InstallationPlanController::partitionSizesMiB() const { return m_partitionSizesMiB; }
+qulonglong InstallationPlanController::sharedSpaceMiB() const { return m_sharedSpaceMiB; }
+void InstallationPlanController::setSharedSpaceMiB(qulonglong value)
+{
+    if (m_sharedSpaceMiB == value) return;
+    m_sharedSpaceMiB = value;
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+qulonglong InstallationPlanController::sharedSpaceStartSector() const { return m_sharedSpaceStartSector; }
+void InstallationPlanController::setSharedSpaceStartSector(qulonglong value)
+{
+    if (m_sharedSpaceStartSector == value) return;
+    m_sharedSpaceStartSector = value;
+    m_sharedSpaceMiB = 0;
+    m_sharedResizeDevice.clear();
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+QString InstallationPlanController::sharedResizeDevice() const { return m_sharedResizeDevice; }
+void InstallationPlanController::setSharedResizeDevice(const QString& value)
+{
+    if (m_sharedResizeDevice == value) return;
+    m_sharedResizeDevice = value;
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+void InstallationPlanController::setManualAssignment(const QString& device, const QString& role)
+{
+    if (m_manualAssignments.value(device).toString() == role) return;
+    if (role.isEmpty()) m_manualAssignments.remove(device);
+    else m_manualAssignments.insert(device, role);
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+void InstallationPlanController::setPartitionLabel(const QString& role, const QString& label)
+{
+    if (m_partitionLabels.value(role).toString() == label) return;
+    m_partitionLabels.insert(role, label);
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+void InstallationPlanController::setPartitionSizeMiB(const QString& role, qulonglong size)
+{
+    if (m_partitionSizesMiB.value(role).toULongLong() == size) return;
+    m_partitionSizesMiB.insert(role, QVariant::fromValue<qulonglong>(size));
+    m_acknowledgeDiskErasure = false;
     invalidateStoragePreflight();
     invalidatePlan();
 }
@@ -540,6 +672,14 @@ void InstallationPlanController::setPartitioningMode(const QString& value)
 {
     if (m_partitioningMode == value) return;
     m_partitioningMode = value;
+    if (value != QStringLiteral("share"))
+        m_sharedResizeDevice.clear();
+    if (value == QStringLiteral("manual"))
+        m_swapChoice = QStringLiteral("None");
+    else if (m_swapChoice == QStringLiteral("None"))
+        m_swapChoice = QStringLiteral("Small");
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
     invalidatePlan();
 }
 
@@ -548,6 +688,7 @@ void InstallationPlanController::setSwapChoice(const QString& value)
 {
     if (m_swapChoice == value) return;
     m_swapChoice = value;
+    m_acknowledgeDiskErasure = false;
     invalidateStoragePreflight();
     invalidatePlan();
 }
@@ -573,6 +714,7 @@ void InstallationPlanController::setEncryptHome(bool value)
 {
     if (m_encryptHome == value) return;
     m_encryptHome = value;
+    m_acknowledgeDiskErasure = false;
     invalidateStoragePreflight();
     invalidatePlan();
 }
@@ -582,9 +724,40 @@ void InstallationPlanController::setEncryptVarLib(bool value)
 {
     if (m_encryptVarLib == value) return;
     m_encryptVarLib = value;
+    m_acknowledgeDiskErasure = false;
     invalidateStoragePreflight();
     invalidatePlan();
 }
+bool InstallationPlanController::encryptRoot() const { return m_encryptRoot; }
+void InstallationPlanController::setEncryptRoot(bool value)
+{
+    if (m_encryptRoot == value) return;
+    m_encryptRoot = value;
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+
+bool InstallationPlanController::encryptSwap() const { return m_encryptSwap; }
+void InstallationPlanController::setEncryptSwap(bool value)
+{
+    if (m_encryptSwap == value) return;
+    m_encryptSwap = value;
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+
+bool InstallationPlanController::encryptInstallation() const { return m_encryptInstallation; }
+void InstallationPlanController::setEncryptInstallation(bool value)
+{
+    if (m_encryptInstallation == value) return;
+    m_encryptInstallation = value;
+    m_acknowledgeDiskErasure = false;
+    invalidateStoragePreflight();
+    invalidatePlan();
+}
+
 bool InstallationPlanController::acknowledgeDiskErasure() const { return m_acknowledgeDiskErasure; }
 void InstallationPlanController::setAcknowledgeDiskErasure(bool value)
 {
@@ -639,6 +812,9 @@ QVariantMap InstallationPlanController::validatedPlanMap() const
     case PartitioningMode::Automated:
         partitioningMode = QStringLiteral("automated");
         break;
+    case PartitioningMode::Shared:
+        partitioningMode = QStringLiteral("share");
+        break;
     case PartitioningMode::Manual:
         partitioningMode = QStringLiteral("manual");
         break;
@@ -679,9 +855,11 @@ QVariantMap InstallationPlanController::validatedPlanMap() const
         {QStringLiteral("hostname"), plan.hostname},
         {QStringLiteral("userPassword"), plan.userPassword},
         {QStringLiteral("passwordConfirmation"), m_passwordConfirmation},
-        {QStringLiteral("encryptionPassphrase"), m_encryptHome || m_encryptVarLib
+        {QStringLiteral("encryptionPassphrase"), plan.partitions.at(0).encrypted
+                || plan.partitions.at(1).encrypted || plan.partitions.at(2).encrypted || plan.encryptSwap
             ? plan.encryptionPassphrase : QString()},
-        {QStringLiteral("encryptionPassphraseConfirmation"), m_encryptHome || m_encryptVarLib
+        {QStringLiteral("encryptionPassphraseConfirmation"), plan.partitions.at(0).encrypted
+                || plan.partitions.at(1).encrypted || plan.partitions.at(2).encrypted || plan.encryptSwap
             ? m_encryptionPassphraseConfirmation : QString()},
         {QStringLiteral("acknowledgeDiskErasure"), plan.acknowledgeDiskErasure},
         {QStringLiteral("userShell"), plan.userShell},
@@ -689,8 +867,16 @@ QVariantMap InstallationPlanController::validatedPlanMap() const
         {QStringLiteral("automaticLogin"), plan.automaticLogin},
         {QStringLiteral("allowWeakPassword"), plan.allowWeakPassword},
         {QStringLiteral("targetDevice"), plan.targetDevice},
+        {QStringLiteral("manualAssignments"), plan.manualAssignments},
+        {QStringLiteral("manualPartitionLayout"), plan.manualPartitionLayout},
+        {QStringLiteral("partitionLabels"), plan.partitionLabels},
+        {QStringLiteral("partitionSizesMiB"), plan.partitionSizesMiB},
+        {QStringLiteral("sharedSpaceMiB"), QVariant::fromValue<qulonglong>(plan.sharedSpaceMiB)},
+        {QStringLiteral("sharedSpaceStartSector"), QVariant::fromValue<qulonglong>(plan.sharedSpaceStartSector)},
+        {QStringLiteral("sharedResizeDevice"), plan.sharedResizeDevice},
         {QStringLiteral("partitioningMode"), partitioningMode},
         {QStringLiteral("swapChoice"), swapChoice},
+        {QStringLiteral("encryptSwap"), plan.encryptSwap},
         {QStringLiteral("partitions"), partitions},
         {QStringLiteral("efiMountPoint"), plan.efiMountPoint},
         {QStringLiteral("efiRecommendedSizeMiB"), plan.efiRecommendedSizeMiB},
@@ -761,8 +947,18 @@ bool InstallationPlanController::validateAndBuildPlan()
     plan.username = m_username;
     plan.hostname = m_hostname;
     plan.userPassword = m_userPassword;
-    plan.encryptionPassphrase = (m_encryptHome || m_encryptVarLib)
+    const bool manualMode = m_partitioningMode == QStringLiteral("manual");
+    const bool encryptRoot = manualMode
+        ? m_encryptRoot && m_manualAssignments.values().contains(QVariant(QStringLiteral("/"))) : m_encryptInstallation;
+    const bool encryptHome = manualMode
+        ? m_encryptHome && m_manualAssignments.values().contains(QVariant(QStringLiteral("/home"))) : m_encryptInstallation;
+    const bool encryptVarLib = manualMode
+        ? m_encryptVarLib && m_manualAssignments.values().contains(QVariant(QStringLiteral("/var/lib"))) : m_encryptInstallation;
+    const bool encryptSwap = manualMode
+        ? m_encryptSwap && m_manualAssignments.values().contains(QVariant(QStringLiteral("swap"))) : m_encryptInstallation;
+    plan.encryptionPassphrase = (encryptRoot || encryptHome || encryptVarLib || encryptSwap)
         ? m_encryptionPassphrase : QString();
+    plan.encryptSwap = encryptSwap;
     plan.acknowledgeDiskErasure = m_acknowledgeDiskErasure;
     plan.userGroups = {
         QStringLiteral("adm"), QStringLiteral("bluetooth"), QStringLiteral("cdrom"),
@@ -776,7 +972,15 @@ bool InstallationPlanController::validateAndBuildPlan()
     plan.targetDevice = m_targetDisk;
     plan.partitioningMode = m_partitioningMode == QStringLiteral("automated")
         ? PartitioningMode::Automated
-        : PartitioningMode::Manual;
+        : (m_partitioningMode == QStringLiteral("share")
+            ? PartitioningMode::Shared : PartitioningMode::Manual);
+    plan.manualAssignments = m_manualAssignments;
+    plan.manualPartitionLayout = m_manualPartitionLayout;
+    plan.partitionLabels = m_partitionLabels;
+    plan.partitionSizesMiB = m_partitionSizesMiB;
+    plan.sharedSpaceMiB = m_sharedSpaceMiB;
+    plan.sharedSpaceStartSector = m_sharedSpaceStartSector;
+    plan.sharedResizeDevice = m_sharedResizeDevice;
     if (m_swapChoice == QStringLiteral("None"))
         plan.swapChoice = SwapChoice::None;
     else if (m_swapChoice == QStringLiteral("Suspend"))
@@ -790,9 +994,9 @@ bool InstallationPlanController::validateAndBuildPlan()
     plan.targetDiskBytes = m_targetDiskBytes;
     plan.logicalBlockSize = m_logicalBlockSize;
     plan.partitions = {
-        {QStringLiteral("/"), QStringLiteral("xfs"), 23, false, false},
-        {QStringLiteral("/home"), QStringLiteral("f2fs"), 67, m_encryptHome, true},
-        {QStringLiteral("/var/lib"), QStringLiteral("f2fs"), 10, m_encryptVarLib, true}
+        {QStringLiteral("/"), QStringLiteral("xfs"), 23, encryptRoot, false},
+        {QStringLiteral("/home"), QStringLiteral("f2fs"), 67, encryptHome, true},
+        {QStringLiteral("/var/lib"), QStringLiteral("f2fs"), 10, encryptVarLib, true}
     };
 
     m_validatedPlan = std::move(plan);
@@ -803,8 +1007,17 @@ bool InstallationPlanController::validateAndBuildPlan()
 QString InstallationPlanController::storagePreflightFingerprint() const
 {
     return QStringList{m_targetDisk, m_imagePath, m_imageFormat, m_swapChoice,
+                       m_partitioningMode, QString::number(m_sharedSpaceMiB),
+                       QString::number(m_sharedSpaceStartSector), m_sharedResizeDevice,
+                       QString::fromUtf8(QJsonDocument::fromVariant(m_manualAssignments).toJson(QJsonDocument::Compact)),
+                       QString::fromUtf8(QJsonDocument::fromVariant(m_manualPartitionLayout).toJson(QJsonDocument::Compact)),
+                       QString::fromUtf8(QJsonDocument::fromVariant(m_partitionLabels).toJson(QJsonDocument::Compact)),
+                       QString::fromUtf8(QJsonDocument::fromVariant(m_partitionSizesMiB).toJson(QJsonDocument::Compact)),
                        m_encryptHome ? QStringLiteral("1") : QStringLiteral("0"),
-                       m_encryptVarLib ? QStringLiteral("1") : QStringLiteral("0")}
+                       m_encryptVarLib ? QStringLiteral("1") : QStringLiteral("0"),
+                       m_encryptRoot ? QStringLiteral("1") : QStringLiteral("0"),
+                       m_encryptSwap ? QStringLiteral("1") : QStringLiteral("0"),
+                       m_encryptInstallation ? QStringLiteral("1") : QStringLiteral("0")}
         .join(QChar(0x1f));
 }
 
@@ -831,17 +1044,35 @@ void InstallationPlanController::runStoragePreflight()
     const QString imagePath = m_imagePath;
     const QString imageFormat = m_imageFormat;
     const QString swapChoice = m_swapChoice;
-    const bool encryptHome = m_encryptHome;
-    const bool encryptVarLib = m_encryptVarLib;
+    const bool manualMode = m_partitioningMode == QStringLiteral("manual");
+    const bool encryptRoot = manualMode
+        ? m_encryptRoot && m_manualAssignments.values().contains(QVariant(QStringLiteral("/"))) : m_encryptInstallation;
+    const bool encryptHome = manualMode
+        ? m_encryptHome && m_manualAssignments.values().contains(QVariant(QStringLiteral("/home"))) : m_encryptInstallation;
+    const bool encryptVarLib = manualMode
+        ? m_encryptVarLib && m_manualAssignments.values().contains(QVariant(QStringLiteral("/var/lib"))) : m_encryptInstallation;
+    const bool encryptSwap = manualMode
+        ? m_encryptSwap && m_manualAssignments.values().contains(QVariant(QStringLiteral("swap"))) : m_encryptInstallation;
+    const QString partitioningMode = m_partitioningMode;
+    const QVariantMap manualAssignments = m_manualAssignments;
+    const QVariantList manualPartitionLayout = m_manualPartitionLayout;
+    const QVariantMap partitionLabels = m_partitionLabels;
+    const QVariantMap partitionSizesMiB = m_partitionSizesMiB;
+    const quint64 sharedSpaceMiB = m_sharedSpaceMiB;
+    const quint64 sharedSpaceStartSector = m_sharedSpaceStartSector;
+    const QString sharedResizeDevice = m_sharedResizeDevice;
     updateValidation();
     Q_EMIT planChanged();
 
     const QPointer<InstallationPlanController> guard(this);
     QThreadPool::globalInstance()->start(QRunnable::create(
         [guard, generation, fingerprint, targetDisk, imagePath, imageFormat,
-         swapChoice, encryptHome, encryptVarLib] {
+         swapChoice, encryptRoot, encryptHome, encryptVarLib, encryptSwap, partitioningMode, manualAssignments,
+         manualPartitionLayout, partitionLabels, partitionSizesMiB, sharedSpaceMiB, sharedSpaceStartSector, sharedResizeDevice] {
             const StoragePreflightResult result = SystemDiscovery::preflightStorage(
-                targetDisk, imagePath, imageFormat, swapChoice, encryptHome, encryptVarLib);
+                targetDisk, imagePath, imageFormat, swapChoice, encryptRoot, encryptHome, encryptVarLib,
+                encryptSwap, partitioningMode, manualAssignments, manualPartitionLayout, partitionLabels, partitionSizesMiB, sharedSpaceMiB,
+                sharedSpaceStartSector, sharedResizeDevice);
             if (!guard)
                 return;
             QMetaObject::invokeMethod(guard.data(), [guard, generation, fingerprint, result] {
@@ -943,8 +1174,13 @@ void InstallationPlanController::updateValidation()
 
     if (!m_debugMode) {
         if (!m_acknowledgeDiskErasure)
-            errors.append(tr("Confirm that the selected disk may be erased."));
-        if ((m_encryptHome || m_encryptVarLib)
+            errors.append(tr("Confirm the selected storage changes."));
+        const bool needsEncryption = (m_partitioningMode != QStringLiteral("manual") && m_encryptInstallation)
+            || (m_encryptRoot && m_manualAssignments.values().contains(QVariant(QStringLiteral("/"))))
+            || (m_encryptHome && m_manualAssignments.values().contains(QVariant(QStringLiteral("/home"))))
+            || (m_encryptVarLib && m_manualAssignments.values().contains(QVariant(QStringLiteral("/var/lib"))))
+            || (m_encryptSwap && m_manualAssignments.values().contains(QVariant(QStringLiteral("swap"))));
+        if (needsEncryption
             && (m_encryptionPassphrase.size() < 12 || m_encryptionPassphrase.size() > 128
                 || m_encryptionPassphrase.contains(QRegularExpression(QStringLiteral("[\\x00-\\x1F\\x7F]")))
                 || m_encryptionPassphrase != m_encryptionPassphraseConfirmation))
@@ -955,8 +1191,10 @@ void InstallationPlanController::updateValidation()
             errors.append(m_storagePreflightErrors);
     }
 
-    if (m_partitioningMode != QStringLiteral("automated"))
-        errors.append(tr("Manual partition editing is not available yet."));
+    if (m_partitioningMode != QStringLiteral("automated")
+        && m_partitioningMode != QStringLiteral("share")
+        && m_partitioningMode != QStringLiteral("manual"))
+        errors.append(tr("Select a valid partitioning method."));
 
     static const QStringList swapChoices = {
         QStringLiteral("None"), QStringLiteral("Small"),

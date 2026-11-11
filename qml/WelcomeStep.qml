@@ -87,7 +87,7 @@ ColumnLayout {
     Maui.SectionHeader {
         Layout.fillWidth: true
         text1: qsTr("Select a Language")
-        text2: qsTr("Choose your language, regional formats, time zone, and keyboard layout before continuing.")
+        text2: qsTr("Set language, regional formats, time zone, and keyboard.")
         label1.font.weight: Font.Normal
         label1.font.pointSize: Maui.Style.fontSizes.enormous * 2
         label1.wrapMode: Text.WordWrap
@@ -194,10 +194,18 @@ ColumnLayout {
                 }
             }
 
-            Button {
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                flat: true
                 visible: welcomeStep.moreLanguagesVisible
-                text: qsTr("Choose a language")
-                onClicked: languageDialog.open()
+                label1.text: qsTr("Choose")
+                label2.text: qsTr("Browse all available languages.")
+                label2.wrapMode: Text.Wrap
+
+                Button {
+                    text: qsTr("Choose")
+                    onClicked: languageDialog.open()
+                }
             }
         }
     }
@@ -217,8 +225,8 @@ ColumnLayout {
 
             Maui.SectionHeader {
                 Layout.fillWidth: true
-                text1: qsTr("Locale and regional formats")
-                text2: qsTr("Choose the locale for the installed system.")
+                text1: qsTr("Locale and Regional Formats")
+                text2: qsTr("Set regional formats.")
             }
 
             ComboBox {
@@ -259,13 +267,13 @@ ColumnLayout {
                 Maui.SectionHeader {
                     Layout.fillWidth: true
                     text1: qsTr("Country")
-                    text2: qsTr("Choose the time zone region for the installed system.")
+                    text2: qsTr("Choose a time zone region.")
                 }
 
                 Maui.SectionHeader {
                     Layout.fillWidth: true
                     text1: qsTr("City")
-                    text2: qsTr("Choose a location or time zone in the selected region.")
+                    text2: qsTr("Choose a city in this region.")
                 }
 
                 ComboBox {
@@ -345,8 +353,8 @@ ColumnLayout {
 
             Maui.SectionHeader {
                 Layout.fillWidth: true
-                text1: qsTr("Keyboard layout")
-                text2: qsTr("Choose the layout for the installed system.")
+                text1: qsTr("Keyboard Layout")
+                text2: qsTr("Choose the installed layout.")
             }
 
             ComboBox {
@@ -374,7 +382,7 @@ ColumnLayout {
                 Layout.fillWidth: true
                 flat: true
                 label1.text: qsTr("Advanced keyboard configuration")
-                label2.text: qsTr("Choose an optional variant, model, or keyboard options.")
+                label2.text: qsTr("Set optional keyboard details.")
                 label2.wrapMode: Text.Wrap
 
                 template.content: Switch {
@@ -382,123 +390,122 @@ ColumnLayout {
                     onToggled: welcomeStep.advancedKeyboardVisible = checked
                 }
             }
-        }
-    }
-
-    ColumnLayout {
-        Layout.fillWidth: true
-        visible: welcomeStep.advancedKeyboardVisible
-        spacing: Maui.Style.space.big
-
-        Maui.FlexSectionItem {
-            Layout.fillWidth: true
-            flat: true
-            label1.text: qsTr("Variant")
-            label2.text: qsTr("Choose a variation of the selected keyboard layout.")
-            label2.wrapMode: Text.Wrap
-
-            ComboBox {
-                id: keyboardVariantCombo
+            ColumnLayout {
                 Layout.fillWidth: true
-                model: [{ text: qsTr("Default"), value: "" }]
-                    .concat(installationPlan.keyboardVariantOptions)
-                textRole: "text"
-                valueRole: "value"
-                currentIndex: model.findIndex(choice => choice.value === installationPlan.keyboardVariant)
-                onActivated: {
-                    installationPlan.markRegionalSettingsChanged()
-                    installationPlan.keyboardVariant = currentValue
-                }
-                popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
-                popupScrollBar: true
-                delegate: MenuItem {
-                    width: ListView.view.width
-                    text: keyboardVariantCombo.model[index].text
-                    highlighted: keyboardVariantCombo.highlightedIndex === index
-                }
-            }
-        }
+                visible: welcomeStep.advancedKeyboardVisible
+                spacing: Maui.Style.space.small
 
-        Maui.FlexSectionItem {
-            Layout.fillWidth: true
-            flat: true
-            label1.text: qsTr("Model")
-            label2.text: qsTr("Choose a keyboard model if the default does not match your hardware.")
-            label2.wrapMode: Text.Wrap
+                Maui.FlexSectionItem {
+                    Layout.fillWidth: true
+                    flat: true
+                    label1.text: qsTr("Variant")
+                    label2.text: qsTr("Layout variation.")
+                    label2.wrapMode: Text.Wrap
 
-            ComboBox {
-                id: keyboardModelCombo
-                Layout.fillWidth: true
-                model: [{ text: qsTr("Default"), value: "" }]
-                    .concat(installationPlan.keyboardModelOptions)
-                textRole: "text"
-                valueRole: "value"
-                currentIndex: model.findIndex(choice => choice.value === installationPlan.keyboardModel)
-                onActivated: {
-                    installationPlan.markRegionalSettingsChanged()
-                    installationPlan.keyboardModel = currentValue
-                }
-                popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
-                popupScrollBar: true
-                delegate: MenuItem {
-                    width: ListView.view.width
-                    text: keyboardModelCombo.model[index].text
-                    highlighted: keyboardModelCombo.highlightedIndex === index
-                }
-            }
-        }
-
-        Maui.FlexSectionItem {
-            Layout.fillWidth: true
-            flat: true
-            label1.text: qsTr("Options")
-            label2.text: qsTr("Select additional keyboard behaviors.")
-            label2.wrapMode: Text.Wrap
-
-            ComboBox {
-                id: keyboardOptionsCombo
-                Layout.fillWidth: true
-                model: [{ text: qsTr("None"), value: "" }]
-                    .concat(installationPlan.keyboardOptionOptions)
-                textRole: "text"
-                valueRole: "value"
-                displayText: {
-                    const selected = installationPlan.keyboardOptions.split(",").filter(code => code.length > 0)
-                    if (selected.length === 0)
-                        return qsTr("None")
-                    if (selected.length > 1)
-                        return qsTr("%1 options selected").arg(selected.length)
-                    const choice = installationPlan.keyboardOptionOptions.find(item => item.value === selected[0])
-                    return choice ? choice.text : selected[0]
-                }
-                onActivated: function(index) {
-                    installationPlan.markRegionalSettingsChanged()
-                    const choice = model[index].value
-                    if (!choice) {
-                        installationPlan.keyboardOptions = ""
-                        return
+                    ComboBox {
+                        id: keyboardVariantCombo
+                        Layout.fillWidth: true
+                        model: [{ text: qsTr("Default"), value: "" }]
+                            .concat(installationPlan.keyboardVariantOptions)
+                        textRole: "text"
+                        valueRole: "value"
+                        currentIndex: model.findIndex(choice => choice.value === installationPlan.keyboardVariant)
+                        onActivated: {
+                            installationPlan.markRegionalSettingsChanged()
+                            installationPlan.keyboardVariant = currentValue
+                        }
+                        popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
+                        popupScrollBar: true
+                        delegate: MenuItem {
+                            width: ListView.view.width
+                            text: keyboardVariantCombo.model[index].text
+                            highlighted: keyboardVariantCombo.highlightedIndex === index
+                        }
                     }
-                    const selected = installationPlan.keyboardOptions.split(",").filter(code => code.length > 0)
-                    const position = selected.indexOf(choice)
-                    if (position >= 0)
-                        selected.splice(position, 1)
-                    else
-                        selected.push(choice)
-                    installationPlan.keyboardOptions = selected.join(",")
                 }
-                popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
-                popupScrollBar: true
-                delegate: MenuItem {
-                    width: ListView.view.width
-                    text: keyboardOptionsCombo.model[index].text
-                    icon.name: {
-                        const choice = keyboardOptionsCombo.model[index].value
-                        const selected = installationPlan.keyboardOptions.split(",")
-                            .filter(code => code.length > 0)
-                        return (choice ? selected.includes(choice) : selected.length === 0)
-                            ? "emblem-default" : ""
+
+                Maui.FlexSectionItem {
+                    Layout.fillWidth: true
+                    flat: true
+                    label1.text: qsTr("Model")
+                    label2.text: qsTr("Keyboard model.")
+                    label2.wrapMode: Text.Wrap
+
+                    ComboBox {
+                        id: keyboardModelCombo
+                        Layout.fillWidth: true
+                        model: [{ text: qsTr("Default"), value: "" }]
+                            .concat(installationPlan.keyboardModelOptions)
+                        textRole: "text"
+                        valueRole: "value"
+                        currentIndex: model.findIndex(choice => choice.value === installationPlan.keyboardModel)
+                        onActivated: {
+                            installationPlan.markRegionalSettingsChanged()
+                            installationPlan.keyboardModel = currentValue
+                        }
+                        popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
+                        popupScrollBar: true
+                        delegate: MenuItem {
+                            width: ListView.view.width
+                            text: keyboardModelCombo.model[index].text
+                            highlighted: keyboardModelCombo.highlightedIndex === index
+                        }
                     }
-                    highlighted: keyboardOptionsCombo.highlightedIndex === index
+                }
+
+                Maui.FlexSectionItem {
+                    Layout.fillWidth: true
+                    flat: true
+                    label1.text: qsTr("Options")
+                    label2.text: qsTr("Additional keyboard behaviors.")
+                    label2.wrapMode: Text.Wrap
+
+                    ComboBox {
+                        id: keyboardOptionsCombo
+                        Layout.fillWidth: true
+                        model: [{ text: qsTr("None"), value: "" }]
+                            .concat(installationPlan.keyboardOptionOptions)
+                        textRole: "text"
+                        valueRole: "value"
+                        displayText: {
+                            const selected = installationPlan.keyboardOptions.split(",").filter(code => code.length > 0)
+                            if (selected.length === 0)
+                                return qsTr("None")
+                            if (selected.length > 1)
+                                return qsTr("%1 options selected").arg(selected.length)
+                            const choice = installationPlan.keyboardOptionOptions.find(item => item.value === selected[0])
+                            return choice ? choice.text : selected[0]
+                        }
+                        onActivated: function(index) {
+                            installationPlan.markRegionalSettingsChanged()
+                            const choice = model[index].value
+                            if (!choice) {
+                                installationPlan.keyboardOptions = ""
+                                return
+                            }
+                            const selected = installationPlan.keyboardOptions.split(",").filter(code => code.length > 0)
+                            const position = selected.indexOf(choice)
+                            if (position >= 0)
+                                selected.splice(position, 1)
+                            else
+                                selected.push(choice)
+                            installationPlan.keyboardOptions = selected.join(",")
+                        }
+                        popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 8)
+                        popupScrollBar: true
+                        delegate: MenuItem {
+                            width: ListView.view.width
+                            text: keyboardOptionsCombo.model[index].text
+                            icon.name: {
+                                const choice = keyboardOptionsCombo.model[index].value
+                                const selected = installationPlan.keyboardOptions.split(",")
+                                    .filter(code => code.length > 0)
+                                return (choice ? selected.includes(choice) : selected.length === 0)
+                                    ? "emblem-default" : ""
+                            }
+                            highlighted: keyboardOptionsCombo.highlightedIndex === index
+                        }
+                    }
                 }
             }
         }

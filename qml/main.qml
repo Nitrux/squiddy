@@ -19,7 +19,7 @@ Maui.ApplicationWindow {
     ]
     readonly property var stepDescriptions: [
         qsTr("Prepare to install Nitrux."),
-        qsTr("Create the first user account for this installation."),
+        qsTr("Create the first user account."),
         qsTr("Choose how to prepare a GPT disk for Nitrux."),
         qsTr("Review your choices before installation.")
     ]
@@ -75,38 +75,14 @@ Maui.ApplicationWindow {
             width: stepStack.width
         }
 
-        ColumnLayout {
+        UserStep {
             id: userPage
             width: stepStack.width
-            spacing: Maui.Style.space.big
-
-            Maui.SectionHeader {
-                Layout.fillWidth: true
-                text1: root.steps[1]
-                text2: root.stepDescriptions[1]
-                label2.wrapMode: Text.Wrap
-            }
-
-            UserStep {
-                Layout.fillWidth: true
-            }
         }
 
-        ColumnLayout {
+        PartitioningStep {
             id: partitioningPage
             width: stepStack.width
-            spacing: Maui.Style.space.big
-
-            Maui.SectionHeader {
-                Layout.fillWidth: true
-                text1: root.steps[2]
-                text2: root.stepDescriptions[2]
-                label2.wrapMode: Text.Wrap
-            }
-
-            PartitioningStep {
-                Layout.fillWidth: true
-            }
         }
 
         ColumnLayout {
@@ -133,8 +109,8 @@ Maui.ApplicationWindow {
 
             Maui.SectionHeader {
                 Layout.fillWidth: true
-                text1: qsTr("Debug simulation")
-                text2: qsTr("Installation phases are simulated. No commands or disk operations will run.")
+                text1: qsTr("Debug Simulation")
+                text2: qsTr("Preview the installer without making changes.")
                 label2.wrapMode: Text.Wrap
             }
 
@@ -284,7 +260,7 @@ Maui.ApplicationWindow {
                     text1: nitruxVersion.length > 0
                         ? qsTr("Welcome to Nitrux %1").arg(nitruxVersion)
                         : qsTr("Welcome to Nitrux")
-                    text2: qsTr("You can use this live media to install Nitrux or use it as a temporary system. You can start the installation anytime by launching the installer.")
+                    text2: qsTr("Use this live system now or install Nitrux.")
                     label1.font.weight: Font.Normal
                     label1.font.pointSize: Maui.Style.fontSizes.enormous * 2
                     label1.wrapMode: Text.WordWrap
@@ -530,7 +506,8 @@ Maui.ApplicationWindow {
                     : (installationPlan.debugMode ? qsTr("Simulate installation")
                         : (privilegedInstaller.busy ? qsTr("Installing…") : qsTr("Install"))))
             enabled: root.showingIntro ? !introAnimation.running
-                : !stepStack.busy && (root.currentStep < root.steps.length - 1
+                : !stepStack.busy && ((root.currentStep < root.steps.length - 1
+                    && (root.currentStep !== 2 || partitioningPage.readyToContinue))
                     || (installationPlan.debugMode && installationPlan.planValid)
                     || (!installationPlan.debugMode && installationPlan.planValid
                         && installationPlan.storagePreflightComplete

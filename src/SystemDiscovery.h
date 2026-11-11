@@ -43,10 +43,21 @@ class SystemDiscovery final
 public:
     static SystemDiscoveryResults discover();
     static bool isSuitableTargetDisk(const QString& devicePath, const QString& imagePath = {});
+    static QVariantMap inspectTargetDisk(const QString& devicePath, const QString& imagePath = {});
     static StoragePreflightResult preflightStorage(const QString& devicePath,
                                                    const QString& imagePath,
                                                    const QString& imageFormat,
                                                    const QString& swapChoice,
+                                                   bool encryptRoot,
                                                    bool encryptHome,
-                                                   bool encryptVarLib);
+                                                   bool encryptVarLib,
+                                                   bool encryptSwap,
+                                                   const QString& partitioningMode,
+                                                   const QVariantMap& manualAssignments,
+                                                   const QVariantList& manualPartitionLayout,
+                                                   const QVariantMap& partitionLabels,
+                                                   const QVariantMap& partitionSizesMiB,
+                                                   quint64 sharedSpaceMiB,
+                                                   quint64 sharedSpaceStartSector,
+                                                   const QString& sharedResizeDevice);
 };

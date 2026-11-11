@@ -19,6 +19,7 @@ enum class ImageFormat {
 
 enum class PartitioningMode {
     Automated,
+    Shared,
     Manual
 };
 
@@ -65,6 +66,14 @@ struct InstallationPlan {
     bool automaticLogin = false;
     bool allowWeakPassword = false;
     QString targetDevice;
+    QVariantMap manualAssignments;
+    QVariantList manualPartitionLayout;
+    QVariantMap partitionLabels;
+    QVariantMap partitionSizesMiB;
+    quint64 sharedSpaceMiB = 0;
+    quint64 sharedSpaceStartSector = 0;
+    QString sharedResizeDevice;
+    bool encryptSwap = false;
     PartitioningMode partitioningMode = PartitioningMode::Automated;
     SwapChoice swapChoice = SwapChoice::Small;
     std::vector<PlannedPartition> partitions;
@@ -106,12 +115,23 @@ class InstallationPlanController final : public QObject
     Q_PROPERTY(QString username READ username WRITE setUsername NOTIFY planChanged)
     Q_PROPERTY(QString hostname READ hostname WRITE setHostname NOTIFY planChanged)
     Q_PROPERTY(QString targetDisk READ targetDisk WRITE setTargetDisk NOTIFY planChanged)
+    Q_PROPERTY(QVariantMap targetDiskInfo READ targetDiskInfo NOTIFY planChanged)
+    Q_PROPERTY(QVariantMap manualAssignments READ manualAssignments NOTIFY planChanged)
+    Q_PROPERTY(QVariantList manualPartitionLayout READ manualPartitionLayout NOTIFY planChanged)
+    Q_PROPERTY(QVariantMap partitionLabels READ partitionLabels NOTIFY planChanged)
+    Q_PROPERTY(QVariantMap partitionSizesMiB READ partitionSizesMiB NOTIFY planChanged)
+    Q_PROPERTY(qulonglong sharedSpaceMiB READ sharedSpaceMiB WRITE setSharedSpaceMiB NOTIFY planChanged)
+    Q_PROPERTY(qulonglong sharedSpaceStartSector READ sharedSpaceStartSector WRITE setSharedSpaceStartSector NOTIFY planChanged)
+    Q_PROPERTY(QString sharedResizeDevice READ sharedResizeDevice WRITE setSharedResizeDevice NOTIFY planChanged)
     Q_PROPERTY(QString partitioningMode READ partitioningMode WRITE setPartitioningMode NOTIFY planChanged)
     Q_PROPERTY(QString swapChoice READ swapChoice WRITE setSwapChoice NOTIFY planChanged)
     Q_PROPERTY(bool automaticLogin READ automaticLogin WRITE setAutomaticLogin NOTIFY planChanged)
     Q_PROPERTY(bool allowWeakPassword READ allowWeakPassword WRITE setAllowWeakPassword NOTIFY planChanged)
     Q_PROPERTY(bool encryptHome READ encryptHome WRITE setEncryptHome NOTIFY planChanged)
     Q_PROPERTY(bool encryptVarLib READ encryptVarLib WRITE setEncryptVarLib NOTIFY planChanged)
+    Q_PROPERTY(bool encryptRoot READ encryptRoot WRITE setEncryptRoot NOTIFY planChanged)
+    Q_PROPERTY(bool encryptSwap READ encryptSwap WRITE setEncryptSwap NOTIFY planChanged)
+    Q_PROPERTY(bool encryptInstallation READ encryptInstallation WRITE setEncryptInstallation NOTIFY planChanged)
     Q_PROPERTY(bool acknowledgeDiskErasure READ acknowledgeDiskErasure WRITE setAcknowledgeDiskErasure NOTIFY planChanged)
 
     Q_PROPERTY(bool planValid READ planValid NOTIFY planChanged)
@@ -140,6 +160,7 @@ public:
     QVariantList keyboardModelOptions() const;
     QVariantList keyboardOptionOptions() const;
     QStringList availableTargetDisks() const;
+    Q_INVOKABLE QString diskDisplayName(const QString& devicePath) const;
     void setAvailableLanguages(const QStringList& choices);
     void setAvailableLocales(const QStringList& choices);
     void setAvailableTimeZones(const QStringList& choices);
@@ -182,6 +203,21 @@ public:
     void setHostname(const QString& value);
     QString targetDisk() const;
     void setTargetDisk(const QString& value);
+    QVariantMap targetDiskInfo() const;
+    QVariantMap manualAssignments() const;
+    QVariantList manualPartitionLayout() const;
+    Q_INVOKABLE void setManualPartitionLayout(const QVariantList& layout);
+    QVariantMap partitionLabels() const;
+    QVariantMap partitionSizesMiB() const;
+    qulonglong sharedSpaceMiB() const;
+    void setSharedSpaceMiB(qulonglong value);
+    qulonglong sharedSpaceStartSector() const;
+    void setSharedSpaceStartSector(qulonglong value);
+    QString sharedResizeDevice() const;
+    void setSharedResizeDevice(const QString& value);
+    Q_INVOKABLE void setManualAssignment(const QString& device, const QString& role);
+    Q_INVOKABLE void setPartitionLabel(const QString& role, const QString& label);
+    Q_INVOKABLE void setPartitionSizeMiB(const QString& role, qulonglong size);
     QString partitioningMode() const;
     void setPartitioningMode(const QString& value);
     QString swapChoice() const;
@@ -194,6 +230,12 @@ public:
     void setEncryptHome(bool value);
     bool encryptVarLib() const;
     void setEncryptVarLib(bool value);
+    bool encryptRoot() const;
+    void setEncryptRoot(bool value);
+    bool encryptSwap() const;
+    void setEncryptSwap(bool value);
+    bool encryptInstallation() const;
+    void setEncryptInstallation(bool value);
     bool acknowledgeDiskErasure() const;
     void setAcknowledgeDiskErasure(bool value);
 
@@ -254,6 +296,20 @@ private:
     QString m_username;
     QString m_hostname;
     QString m_targetDisk;
+    QVariantMap m_targetDiskInfo;
+    QVariantMap m_manualAssignments;
+    QVariantList m_manualPartitionLayout;
+    QVariantMap m_partitionLabels{
+        {QStringLiteral("/boot/efi"), QStringLiteral("ESP")},
+        {QStringLiteral("/"), QStringLiteral("NX_ROOT")},
+        {QStringLiteral("/home"), QStringLiteral("NX_HOME")},
+        {QStringLiteral("/var/lib"), QStringLiteral("NX_VAR_LIB")},
+        {QStringLiteral("swap"), QStringLiteral("SWAP")}
+    };
+    QVariantMap m_partitionSizesMiB;
+    quint64 m_sharedSpaceMiB = 0;
+    quint64 m_sharedSpaceStartSector = 0;
+    QString m_sharedResizeDevice;
     QString m_partitioningMode = QStringLiteral("automated");
     QString m_swapChoice = QStringLiteral("Small");
     QString m_userPassword;
@@ -263,8 +319,11 @@ private:
     bool m_acknowledgeDiskErasure = false;
     bool m_automaticLogin = false;
     bool m_allowWeakPassword = false;
-    bool m_encryptHome = true;
-    bool m_encryptVarLib = true;
+    bool m_encryptHome = false;
+    bool m_encryptVarLib = false;
+    bool m_encryptRoot = false;
+    bool m_encryptSwap = false;
+    bool m_encryptInstallation = false;
     QStringList m_validationErrors;
     bool m_storagePreflightBusy = false;
     bool m_storagePreflightComplete = false;

@@ -17,6 +17,7 @@
 #include <QVariantMap>
 
 #include <algorithm>
+#include <limits>
 #include <unistd.h>
 
 namespace {
@@ -47,13 +48,6 @@ struct CryptMapperGuard {
         close(nullptr);
     }
 };
-
-QString partitionPath(const QString& disk, int number)
-{
-    const QString base = QFileInfo(disk).fileName();
-    return disk + (QRegularExpression(QStringLiteral("[0-9]$")).match(base).hasMatch() ? QStringLiteral("p") : QString())
-        + QString::number(number);
-}
 
 bool run(const QString& program, const QStringList& arguments, const QByteArray& input,
          QString* output, QString* error)
@@ -198,9 +192,337 @@ bool unmountAll(QList<MountRecord>* mounts, QString* error)
     return success;
 }
 
-QVariantMap rowAt(const InstallationPlan& plan, int index)
+QVariantMap rowForRole(const InstallationPlan& plan, const QString& role)
 {
-    return index >= 0 && index < plan.storageLayout.size() ? plan.storageLayout.at(index).toMap() : QVariantMap{};
+    for (const QVariant& value : plan.storageLayout) {
+        const QVariantMap row = value.toMap();
+        if (row.value(QStringLiteral("mountPoint")).toString() == role
+            && !row.value(QStringLiteral("device")).toString().isEmpty())
+            return row;
+    }
+    return {};
+}
+
+QString deviceForRole(const InstallationPlan& plan, const QString& role)
+{
+    return rowForRole(plan, role).value(QStringLiteral("device")).toString();
+}
+
+QString labelForRole(const InstallationPlan& plan, const QString& role)
+{
+    return rowForRole(plan, role).value(QStringLiteral("label")).toString();
+}
+
+bool runAllowE2fsckRepair(const QString& device, QString* error)
+{
+    const QString executable = QStandardPaths::findExecutable(QStringLiteral("e2fsck"));
+    if (executable.isEmpty()) {
+        *error = QObject::tr("Required program e2fsck is unavailable.");
+        return false;
+    }
+    QProcess process;
+    process.setProgram(executable);
+    process.setArguments({QStringLiteral("-f"), QStringLiteral("-p"), device});
+    process.start();
+    if (!process.waitForStarted() || !process.waitForFinished(-1)) {
+        process.kill();
+        process.waitForFinished();
+        *error = QObject::tr("Could not check the filesystem on %1.").arg(device);
+        return false;
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() > 1) {
+        const QString detail = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+        *error = detail.isEmpty() ? QObject::tr("Filesystem check failed for %1.").arg(device) : detail;
+        return false;
+    }
+    return true;
+}
+
+bool extFilesystemSizeBytes(const QString& device, quint64* sizeBytes, QString* error)
+{
+    QString details;
+    if (!runPath(QStringLiteral("dumpe2fs"),
+            {QStringLiteral("-h"), device}, {}, &details, error))
+        return false;
+    static const QRegularExpression blockCountPattern(
+        QStringLiteral("(?m)^Block count:\\s*(\\d+)\\s*$"));
+    static const QRegularExpression blockSizePattern(
+        QStringLiteral("(?m)^Block size:\\s*(\\d+)\\s*$"));
+    const auto countMatch = blockCountPattern.match(details);
+    const auto sizeMatch = blockSizePattern.match(details);
+    bool countOk = false;
+    bool blockSizeOk = false;
+    const quint64 blocks = countMatch.captured(1).toULongLong(&countOk);
+    const quint64 blockSize = sizeMatch.captured(1).toULongLong(&blockSizeOk);
+    if (!countOk || !blockSizeOk || blocks == 0 || blockSize == 0
+        || blocks > std::numeric_limits<quint64>::max() / blockSize) {
+        *error = QObject::tr("Could not read the ext filesystem size on %1.").arg(device);
+        return false;
+    }
+    *sizeBytes = blocks * blockSize;
+    return true;
+}
+
+bool shrinkSharedFilesystem(const QVariantMap& resizeRow, QString* error)
+{
+    const QString device = resizeRow.value(QStringLiteral("device")).toString();
+    const QString filesystem = resizeRow.value(QStringLiteral("filesystem")).toString();
+    const quint64 newSizeBytes = resizeRow.value(QStringLiteral("sizeBytes")).toULongLong();
+    constexpr quint64 filesystemMargin = 64ULL * 1024 * 1024;
+    if (newSizeBytes <= filesystemMargin) {
+        *error = QObject::tr("The resized partition is too small for filesystem metadata.");
+        return false;
+    }
+    const quint64 targetFilesystemMiB = (newSizeBytes - filesystemMargin) / (1024ULL * 1024);
+    if (filesystem == QStringLiteral("ext2") || filesystem == QStringLiteral("ext3")
+        || filesystem == QStringLiteral("ext4")) {
+        if (!runAllowE2fsckRepair(device, error))
+            return false;
+        quint64 currentFilesystemBytes = 0;
+        if (!extFilesystemSizeBytes(device, &currentFilesystemBytes, error))
+            return false;
+        if (currentFilesystemBytes > targetFilesystemMiB * (1024ULL * 1024)
+            && !runPath(QStringLiteral("resize2fs"),
+                {device, QStringLiteral("%1M").arg(targetFilesystemMiB)}, {}, nullptr, error))
+            return false;
+        return runAllowE2fsckRepair(device, error);
+    }
+    if (filesystem == QStringLiteral("ntfs")) {
+        const QString size = QStringLiteral("%1Mi").arg(targetFilesystemMiB);
+        const QStringList checkArguments{QStringLiteral("--no-action"), QStringLiteral("--size"), size, device};
+        if (!runPath(QStringLiteral("ntfsresize"), checkArguments, {}, nullptr, error))
+            return false;
+        return runPath(QStringLiteral("ntfsresize"),
+            {QStringLiteral("--size"), size, device}, {}, nullptr, error);
+    }
+    if (filesystem == QStringLiteral("vfat")) {
+        if (targetFilesystemMiB < 512) {
+            *error = QObject::tr("FAT32 partitions cannot be shrunk below 512 MiB.");
+            return false;
+        }
+        return runPath(QStringLiteral("fatresize"),
+            {QStringLiteral("--size"), QStringLiteral("%1Mi").arg(targetFilesystemMiB), device},
+            {}, nullptr, error);
+    }
+    if (filesystem == QStringLiteral("swap"))
+        return true;
+    if (filesystem != QStringLiteral("btrfs")) {
+        *error = QObject::tr("This existing filesystem cannot be resized by Squiddy.");
+        return false;
+    }
+
+    QTemporaryDir mountPoint(QStringLiteral("/run/squiddy-resize-XXXXXX"));
+    if (!mountPoint.isValid()) {
+        *error = QObject::tr("Could not create a temporary filesystem mount point.");
+        return false;
+    }
+    if (!runPath(QStringLiteral("mount"), {device, mountPoint.path()}, {}, nullptr, error))
+        return false;
+    QString showOutput;
+    bool success = runPath(QStringLiteral("btrfs"),
+        {QStringLiteral("filesystem"), QStringLiteral("show"), QStringLiteral("--raw"), mountPoint.path()},
+        {}, &showOutput, error);
+    static const QRegularExpression singleDevice(QStringLiteral("(?m)^\\s*Total devices\\s+1\\s*$"));
+    static const QRegularExpression deviceSizePattern(
+        QStringLiteral("(?m)^\\s*devid\\s+1\\s+size\\s+(\\d+)\\s+used\\s+"));
+    const auto deviceSizeMatch = deviceSizePattern.match(showOutput);
+    bool deviceSizeOk = false;
+    const quint64 deviceSize = deviceSizeMatch.captured(1).toULongLong(&deviceSizeOk);
+    if (success && (!singleDevice.match(showOutput).hasMatch() || !deviceSizeOk)) {
+        *error = QObject::tr("Only a verified single-device Btrfs filesystem can be shrunk by Squiddy.");
+        success = false;
+    }
+    if (success && deviceSize > targetFilesystemMiB * (1024ULL * 1024)) {
+        success = runPath(QStringLiteral("btrfs"),
+            {QStringLiteral("filesystem"), QStringLiteral("resize"),
+             QStringLiteral("%1M").arg(targetFilesystemMiB), mountPoint.path()}, {}, nullptr, error);
+    }
+    QString unmountError;
+    if (!runPath(QStringLiteral("umount"), {mountPoint.path()}, {}, nullptr, &unmountError)) {
+        if (success)
+            *error = unmountError;
+        success = false;
+    }
+    return success;
+}
+
+bool growManualFilesystem(const QVariantMap& resizeRow, QString* error)
+{
+    const QString device = resizeRow.value(QStringLiteral("device")).toString();
+    const QString filesystem = resizeRow.value(QStringLiteral("originalFilesystem")).toString();
+    const quint64 sizeBytes = resizeRow.value(QStringLiteral("sizeBytes")).toULongLong();
+    if (sizeBytes <= 64ULL * 1024 * 1024) {
+        *error = QObject::tr("The resized partition is too small for filesystem metadata.");
+        return false;
+    }
+    const quint64 targetMiB = (sizeBytes - 64ULL * 1024 * 1024) / (1024ULL * 1024);
+    if (filesystem == QStringLiteral("ext2") || filesystem == QStringLiteral("ext3")
+        || filesystem == QStringLiteral("ext4")) {
+        return runAllowE2fsckRepair(device, error)
+            && runPath(QStringLiteral("resize2fs"), {device}, {}, nullptr, error)
+            && runAllowE2fsckRepair(device, error);
+    }
+    if (filesystem == QStringLiteral("ntfs")) {
+        const QString size = QStringLiteral("%1Mi").arg(targetMiB);
+        return runPath(QStringLiteral("ntfsresize"),
+            {QStringLiteral("--no-action"), QStringLiteral("--size"), size, device}, {}, nullptr, error)
+            && runPath(QStringLiteral("ntfsresize"),
+                {QStringLiteral("--size"), size, device}, {}, nullptr, error);
+    }
+    if (filesystem == QStringLiteral("vfat"))
+        return runPath(QStringLiteral("fatresize"),
+            {QStringLiteral("--size"), QStringLiteral("%1Mi").arg(targetMiB), device}, {}, nullptr, error);
+    if (filesystem == QStringLiteral("swap"))
+        return true;
+    if (filesystem != QStringLiteral("btrfs")) {
+        *error = QObject::tr("Squiddy cannot grow the existing %1 filesystem.").arg(filesystem);
+        return false;
+    }
+    QTemporaryDir mountPoint(QStringLiteral("/run/squiddy-grow-XXXXXX"));
+    if (!mountPoint.isValid()) {
+        *error = QObject::tr("Could not create a temporary filesystem mount point.");
+        return false;
+    }
+    if (!runPath(QStringLiteral("mount"), {device, mountPoint.path()}, {}, nullptr, error))
+        return false;
+    QString output;
+    bool success = runPath(QStringLiteral("btrfs"),
+        {QStringLiteral("filesystem"), QStringLiteral("show"), QStringLiteral("--raw"), mountPoint.path()},
+        {}, &output, error);
+    static const QRegularExpression singleDevice(QStringLiteral("(?m)^\\s*Total devices\\s+1\\s*$"));
+    if (success && !singleDevice.match(output).hasMatch()) {
+        *error = QObject::tr("Only a single-device Btrfs filesystem can be grown by Squiddy.");
+        success = false;
+    }
+    if (success)
+        success = runPath(QStringLiteral("btrfs"),
+            {QStringLiteral("filesystem"), QStringLiteral("resize"), QStringLiteral("max"), mountPoint.path()},
+            {}, nullptr, error);
+    QString unmountError;
+    if (!runPath(QStringLiteral("umount"), {mountPoint.path()}, {}, nullptr, &unmountError)) {
+        if (success) *error = unmountError;
+        success = false;
+    }
+    return success;
+}
+
+bool shrinkSharedPartition(const InstallationPlan& plan, const QVariantMap& resizeRow, QString* error)
+{
+    const QString disk = plan.targetDevice;
+    const QString device = resizeRow.value(QStringLiteral("device")).toString();
+    const QVariantMap info = SystemDiscovery::inspectTargetDisk(disk, plan.imagePath);
+    QVariantMap currentPartition;
+    for (const QVariant& value : info.value(QStringLiteral("partitions")).toList()) {
+        const QVariantMap partition = value.toMap();
+        if (partition.value(QStringLiteral("device")).toString() == device) {
+            currentPartition = partition;
+            break;
+        }
+    }
+    if (currentPartition.isEmpty()
+        || currentPartition.value(QStringLiteral("sizeBytes")).toULongLong()
+            != resizeRow.value(QStringLiteral("originalSizeBytes")).toULongLong()
+        || currentPartition.value(QStringLiteral("startSector")).toULongLong()
+            != resizeRow.value(QStringLiteral("startSector")).toULongLong()
+        || currentPartition.value(QStringLiteral("filesystem")).toString()
+            != resizeRow.value(QStringLiteral("filesystem")).toString()) {
+        *error = QObject::tr("The selected partition changed before it could be resized.");
+        return false;
+    }
+    const quint64 reclaimBytes = resizeRow.value(QStringLiteral("reclaimBytes")).toULongLong();
+    if (reclaimBytes == 0)
+        return true;
+    if (!shrinkSharedFilesystem(resizeRow, error))
+        return false;
+
+    const int partitionNumber = resizeRow.value(QStringLiteral("partitionNumber")).toInt();
+    const quint64 sectors = resizeRow.value(QStringLiteral("sectorCount")).toULongLong();
+    const QByteArray script = "size=" + QByteArray::number(sectors) + "\n";
+    if (!runPath(QStringLiteral("sfdisk"),
+            {disk, QStringLiteral("--no-reread"), QStringLiteral("--force"),
+             QStringLiteral("--partno"), QString::number(partitionNumber)},
+            script, nullptr, error))
+        return false;
+    return runPath(QStringLiteral("blockdev"), {QStringLiteral("--rereadpt"), disk}, {}, nullptr, error)
+        && runPath(QStringLiteral("udevadm"), {QStringLiteral("settle")}, {}, nullptr, error);
+}
+
+bool applyManualPartitionLayout(const InstallationPlan& plan, QString* error)
+{
+    const QVariantMap current = SystemDiscovery::inspectTargetDisk(plan.targetDevice, plan.imagePath);
+    if (plan.manualPartitionLayout.isEmpty()) {
+        *error = QObject::tr("The staged manual partition table is unavailable.");
+        return false;
+    }
+    const QString tableId = current.value(QStringLiteral("tableId")).toString();
+    if (!current.value(QStringLiteral("gpt")).toBool()
+        && std::any_of(plan.manualPartitionLayout.cbegin(), plan.manualPartitionLayout.cend(), [](const QVariant& value) {
+            return value.toMap().value(QStringLiteral("action")).toString() != QStringLiteral("create");
+        })) {
+        *error = QObject::tr("Only new partitions can be staged for a new GPT partition table.");
+        return false;
+    }
+    for (const QVariant& value : plan.manualPartitionLayout) {
+        const QVariantMap row = value.toMap();
+        if (row.value(QStringLiteral("tableId")).toString() != tableId) {
+            *error = QObject::tr("The target partition table changed after the editor was opened.");
+            return false;
+        }
+        if (row.value(QStringLiteral("action")).toString() == QStringLiteral("resize")
+            && row.value(QStringLiteral("sectorCount")).toULongLong()
+                < row.value(QStringLiteral("originalSectorCount")).toULongLong()
+            && !row.value(QStringLiteral("format")).toBool()) {
+            QVariantMap resizeRow = row;
+            resizeRow.insert(QStringLiteral("filesystem"), row.value(QStringLiteral("originalFilesystem")));
+            resizeRow.insert(QStringLiteral("sizeBytes"), row.value(QStringLiteral("sectorCount")).toULongLong()
+                * plan.logicalBlockSize);
+            if (!shrinkSharedFilesystem(resizeRow, error))
+                return false;
+        }
+    }
+
+    QByteArray table = "label: gpt\n";
+    if (!tableId.isEmpty())
+        table += "label-id: " + tableId.toLatin1() + "\n";
+    table += "unit: sectors\n\n";
+    for (const QVariant& value : plan.manualPartitionLayout) {
+        const QVariantMap row = value.toMap();
+        if (row.value(QStringLiteral("action")).toString() == QStringLiteral("delete"))
+            continue;
+        const QString device = row.value(QStringLiteral("device")).toString();
+        const quint64 start = row.value(QStringLiteral("startSector")).toULongLong();
+        const quint64 count = row.value(QStringLiteral("sectorCount")).toULongLong();
+        const QString type = row.value(QStringLiteral("plannedTypeGuid"),
+            row.value(QStringLiteral("typeGuid")).toString()).toString();
+        const QString name = row.value(QStringLiteral("label")).toString();
+        table += device.toLatin1() + " : start=" + QByteArray::number(start)
+            + ", size=" + QByteArray::number(count) + ", type=" + type.toLatin1();
+        const QString uuid = row.value(QStringLiteral("uuid")).toString();
+        if (!uuid.isEmpty()) table += ", uuid=" + uuid.toLatin1();
+        const QString attributes = row.value(QStringLiteral("attributes")).toString();
+        if (!attributes.isEmpty()) table += ", attrs=" + attributes.toLatin1();
+        table += ", name=\"" + name.toUtf8() + "\"\n";
+    }
+    if (!runPath(QStringLiteral("sfdisk"),
+            {QStringLiteral("--no-reread"), QStringLiteral("--force"), plan.targetDevice},
+            table, nullptr, error)
+        || !runPath(QStringLiteral("blockdev"), {QStringLiteral("--rereadpt"), plan.targetDevice}, {}, nullptr, error)
+        || !runPath(QStringLiteral("udevadm"), {QStringLiteral("settle")}, {}, nullptr, error))
+        return false;
+    for (const QVariant& value : plan.manualPartitionLayout) {
+        const QVariantMap row = value.toMap();
+        if (row.value(QStringLiteral("action")).toString() == QStringLiteral("create")
+            && !runPath(QStringLiteral("wipefs"), {QStringLiteral("--all"), QStringLiteral("--force"),
+                row.value(QStringLiteral("device")).toString()}, {}, nullptr, error))
+            return false;
+        if (row.value(QStringLiteral("action")).toString() == QStringLiteral("resize")
+            && row.value(QStringLiteral("sectorCount")).toULongLong()
+                > row.value(QStringLiteral("originalSectorCount")).toULongLong()
+            && !row.value(QStringLiteral("format")).toBool()
+            && !growManualFilesystem(row, error))
+            return false;
+    }
+    return true;
 }
 
 bool createPartitions(const InstallationPlan& plan, QString* error)
@@ -215,27 +537,50 @@ bool createPartitions(const InstallationPlan& plan, QString* error)
         plan.swapChoice == SwapChoice::None ? QStringLiteral("None")
             : plan.swapChoice == SwapChoice::Suspend ? QStringLiteral("Suspend")
             : plan.swapChoice == SwapChoice::File ? QStringLiteral("File") : QStringLiteral("Small"),
-        plan.partitions.at(1).encrypted, plan.partitions.at(2).encrypted);
+        plan.partitions.at(0).encrypted, plan.partitions.at(1).encrypted,
+        plan.partitions.at(2).encrypted, plan.encryptSwap,
+        plan.partitioningMode == PartitioningMode::Automated ? QStringLiteral("automated")
+            : (plan.partitioningMode == PartitioningMode::Shared ? QStringLiteral("share")
+                : QStringLiteral("manual")),
+        plan.manualAssignments, plan.manualPartitionLayout, plan.partitionLabels, plan.partitionSizesMiB,
+        plan.sharedSpaceMiB, plan.sharedSpaceStartSector, plan.sharedResizeDevice);
     if (!current.valid || current.layout != plan.storageLayout
         || current.diskBytes != plan.targetDiskBytes || current.logicalBlockSize != plan.logicalBlockSize) {
         *error = QObject::tr("The selected disk no longer matches the approved storage preflight.");
         return false;
     }
 
-    QByteArray table("label: gpt\nunit: sectors\n\n");
+    if (plan.partitioningMode == PartitioningMode::Manual)
+        return applyManualPartitionLayout(plan, error);
+    if (plan.partitioningMode == PartitioningMode::Shared && !plan.sharedResizeDevice.isEmpty()) {
+        for (const QVariant& value : plan.storageLayout) {
+            const QVariantMap row = value.toMap();
+            if (row.value(QStringLiteral("action")).toString() == QStringLiteral("resize")
+                && row.value(QStringLiteral("device")).toString() == plan.sharedResizeDevice
+                && !shrinkSharedPartition(plan, row, error))
+                return false;
+        }
+    }
+    QByteArray table = plan.partitioningMode == PartitioningMode::Automated
+        ? QByteArray("label: gpt\nunit: sectors\n\n") : QByteArray("unit: sectors\n\n");
     for (const QVariant& rowValue : plan.storageLayout) {
         const QVariantMap row = rowValue.toMap();
         const int number = row.value(QStringLiteral("partitionNumber")).toInt();
-        if (number <= 0)
+        if (number <= 0 || row.value(QStringLiteral("action")).toString() != QStringLiteral("create"))
             continue;
+        if (plan.partitioningMode == PartitioningMode::Shared)
+            table += row.value(QStringLiteral("device")).toString().toLatin1() + " : ";
         table += "start=" + row.value(QStringLiteral("startSector")).toString().toLatin1();
         table += ", size=" + row.value(QStringLiteral("sectorCount")).toString().toLatin1();
         table += ", type=" + row.value(QStringLiteral("typeGuid")).toString().toLatin1();
         table += ", name=\"" + row.value(QStringLiteral("label")).toString().toLatin1() + "\"\n";
     }
-    return runPath(QStringLiteral("sfdisk"), {QStringLiteral("--wipe"), QStringLiteral("always"),
-                    QStringLiteral("--wipe-partitions"), QStringLiteral("always"), plan.targetDevice},
-                   table, nullptr, error);
+    const QStringList arguments = plan.partitioningMode == PartitioningMode::Shared
+        ? QStringList{QStringLiteral("--append"), QStringLiteral("--wipe"), QStringLiteral("never"),
+                      QStringLiteral("--wipe-partitions"), QStringLiteral("always"), plan.targetDevice}
+        : QStringList{QStringLiteral("--wipe"), QStringLiteral("always"),
+                      QStringLiteral("--wipe-partitions"), QStringLiteral("always"), plan.targetDevice};
+    return runPath(QStringLiteral("sfdisk"), arguments, table, nullptr, error);
 }
 
 void copyNetworkProfiles(const InstallationPlan& plan, const QString& root)
@@ -276,54 +621,91 @@ void copyNetworkProfiles(const InstallationPlan& plan, const QString& root)
 }
 
 bool applyConfig(const InstallationPlan& plan, const QString& root, const QString& espDevice,
-                 const QString& rootDevice, const QString& homeLuks, const QString& varLuks,
+                 const QString& rootDevice, const QString& rootLuks,
+                 const QString& homeLuks, const QString& varLuks, const QString& swapLuks,
                  QString* error)
 {
-    QString espUuid = uuidFor(espDevice, error);
-    if (espUuid.isEmpty()) return false;
-    QString rootUuid = uuidFor(rootDevice, error);
-    if (rootUuid.isEmpty()) return false;
-    QString homeUuid, varUuid;
-    if (!homeLuks.isEmpty() && !(homeUuid = uuidFor(homeLuks, error)).isEmpty()) {}
-    else if (!homeLuks.isEmpty()) return false;
-    if (!varLuks.isEmpty() && !(varUuid = uuidFor(varLuks, error)).isEmpty()) {}
-    else if (!varLuks.isEmpty()) return false;
+    const QString espUuid = uuidFor(espDevice, error);
+    const QString rootUuid = uuidFor(rootDevice, error);
+    if (espUuid.isEmpty() || rootUuid.isEmpty()) return false;
+
+    QString rootLuksUuid, homeUuid, varUuid, swapLuksUuid;
+    if (!rootLuks.isEmpty()) {
+        rootLuksUuid = uuidFor(rootLuks, error);
+        if (rootLuksUuid.isEmpty()) return false;
+    }
+    if (!homeLuks.isEmpty()) {
+        homeUuid = uuidFor(homeLuks, error);
+        if (homeUuid.isEmpty()) return false;
+    }
+    if (!varLuks.isEmpty()) {
+        varUuid = uuidFor(varLuks, error);
+        if (varUuid.isEmpty()) return false;
+    }
+    if (!swapLuks.isEmpty()) {
+        swapLuksUuid = uuidFor(swapLuks, error);
+        if (swapLuksUuid.isEmpty()) return false;
+    }
 
     QByteArray fstab;
     fstab += "UUID=" + espUuid.toLatin1() + " /boot/efi vfat umask=0077 0 1\n";
-    fstab += "UUID=" + rootUuid.toLatin1() + " / xfs defaults,inode64 0 1\n";
-    const QString homeFilesystemUuid = homeLuks.isEmpty()
-        ? uuidFor(partitionPath(plan.targetDevice, 3), error) : QString();
-    const QString varFilesystemUuid = varLuks.isEmpty()
-        ? uuidFor(partitionPath(plan.targetDevice, 4), error) : QString();
-    if ((homeLuks.isEmpty() && homeFilesystemUuid.isEmpty())
-        || (varLuks.isEmpty() && varFilesystemUuid.isEmpty())) return false;
-    if (homeLuks.isEmpty())
-        fstab += "UUID=" + homeFilesystemUuid.toLatin1() + " /home f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
-    else
-        fstab += "/dev/mapper/nx_home /home f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
-    if (varLuks.isEmpty())
-        fstab += "UUID=" + varFilesystemUuid.toLatin1() + " /var/lib f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
-    else
-        fstab += "/dev/mapper/nx_var_lib /var/lib f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
-    if (!error->isEmpty()) return false;
+    const QByteArray rootSource = rootLuks.isEmpty()
+        ? QByteArray("UUID=") + rootUuid.toLatin1()
+        : QByteArray("/dev/mapper/nx_root");
+    fstab += rootSource + " / xfs defaults,inode64 0 1\n";
 
+    const QString homePartition = deviceForRole(plan, QStringLiteral("/home"));
+    const QString varPartition = deviceForRole(plan, QStringLiteral("/var/lib"));
+    const QString homeFilesystemUuid = !homePartition.isEmpty() && homeLuks.isEmpty()
+        ? uuidFor(homePartition, error) : QString();
+    const QString varFilesystemUuid = !varPartition.isEmpty() && varLuks.isEmpty()
+        ? uuidFor(varPartition, error) : QString();
+    if ((!homePartition.isEmpty() && homeLuks.isEmpty() && homeFilesystemUuid.isEmpty())
+        || (!varPartition.isEmpty() && varLuks.isEmpty() && varFilesystemUuid.isEmpty())) return false;
+    if (!homePartition.isEmpty()) {
+        const QByteArray source = homeLuks.isEmpty()
+            ? QByteArray("UUID=") + homeFilesystemUuid.toLatin1()
+            : QByteArray("/dev/mapper/nx_home");
+        fstab += source + " /home f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
+    }
+    if (!varPartition.isEmpty()) {
+        const QByteArray source = varLuks.isEmpty()
+            ? QByteArray("UUID=") + varFilesystemUuid.toLatin1()
+            : QByteArray("/dev/mapper/nx_var_lib");
+        fstab += source + " /var/lib f2fs defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime 0 2\n";
+    }
+
+    const QString swapPartition = deviceForRole(plan, QStringLiteral("swap"));
+    QString swapUuid;
     if (plan.swapChoice == SwapChoice::File) {
         fstab += "/swapfile none swap defaults 0 0\n";
-    } else if (plan.swapChoice == SwapChoice::Small || plan.swapChoice == SwapChoice::Suspend) {
-        const QString swapUuid = uuidFor(partitionPath(plan.targetDevice, 5), error);
-        if (swapUuid.isEmpty()) return false;
-        fstab += "UUID=" + swapUuid.toLatin1() + " none swap sw,discard 0 0\n";
+    } else if (!swapPartition.isEmpty()) {
+        if (swapLuks.isEmpty()) {
+            swapUuid = uuidFor(swapPartition, error);
+            if (swapUuid.isEmpty()) return false;
+            fstab += "UUID=" + swapUuid.toLatin1() + " none swap sw,discard 0 0\n";
+        } else {
+            fstab += "/dev/mapper/nx_swap none swap sw,discard 0 0\n";
+        }
     }
-    if (!writeFile(root + QStringLiteral("/etc/fstab"), fstab, error)) return false;
+    if (!error->isEmpty() || !writeFile(root + QStringLiteral("/etc/fstab"), fstab, error)) return false;
 
     QByteArray crypttab;
+    if (!rootLuks.isEmpty())
+        crypttab += "nx_root UUID=" + rootLuksUuid.toLatin1() + " none luks,initramfs\n";
     if (!homeLuks.isEmpty()) crypttab += "nx_home UUID=" + homeUuid.toLatin1() + " none luks\n";
     if (!varLuks.isEmpty()) crypttab += "nx_var_lib UUID=" + varUuid.toLatin1() + " none luks\n";
+    if (!swapLuks.isEmpty())
+        crypttab += "nx_swap UUID=" + swapLuksUuid.toLatin1() + " none luks,initramfs\n";
     if (!writeFile(root + QStringLiteral("/etc/crypttab"), crypttab, error)) return false;
+
     QByteArray dmcrypt;
-    if (!homeLuks.isEmpty()) dmcrypt += "target=nx_home\nsource=/dev/disk/by-uuid/" + homeUuid.toLatin1() + "\n\n";
-    if (!varLuks.isEmpty()) dmcrypt += "target=nx_var_lib\nsource=/dev/disk/by-uuid/" + varUuid.toLatin1() + "\n\n";
+    if (!homeLuks.isEmpty())
+        dmcrypt += "target=nx_home\nsource=/dev/disk/by-uuid/" + homeUuid.toLatin1() + "\n\n";
+    if (!varLuks.isEmpty())
+        dmcrypt += "target=nx_var_lib\nsource=/dev/disk/by-uuid/" + varUuid.toLatin1() + "\n\n";
+    if (!swapLuks.isEmpty())
+        dmcrypt += "target=nx_swap\nsource=/dev/disk/by-uuid/" + swapLuksUuid.toLatin1() + "\n\n";
     if (!dmcrypt.isEmpty()) {
         const QString dmcryptPath = root + QStringLiteral("/etc/conf.d/dmcrypt");
         QFile currentDmcrypt(dmcryptPath);
@@ -331,6 +713,18 @@ bool applyConfig(const InstallationPlan& plan, const QString& root, const QStrin
         if (currentDmcrypt.open(QIODevice::ReadOnly | QIODevice::Text))
             existing = currentDmcrypt.readAll();
         if (!writeFile(dmcryptPath, existing + dmcrypt, error)) return false;
+    }
+
+    if (plan.swapChoice == SwapChoice::Suspend) {
+        QByteArray resume;
+        if (!swapLuks.isEmpty())
+            resume = "RESUME=/dev/mapper/nx_swap\n";
+        else if (!swapUuid.isEmpty())
+            resume = "RESUME=UUID=" + swapUuid.toLatin1() + "\n";
+        else
+            resume = "RESUME=none\n";
+        if (!writeFile(root + QStringLiteral("/etc/initramfs-tools/conf.d/resume"), resume, error))
+            return false;
     }
 
     const QString localeGen = root + QStringLiteral("/etc/locale.gen");
@@ -442,54 +836,210 @@ bool InstallationExecutor::execute(const InstallationPlan& plan, const ProgressC
         return false;
     }
 
-    report(2, QObject::tr("Preparing storage"), QObject::tr("Creating the approved GPT partition table…"));
+    const QVariantMap originalDiskInfo = plan.partitioningMode == PartitioningMode::Shared
+        ? SystemDiscovery::inspectTargetDisk(disk, plan.imagePath) : QVariantMap{};
+    if (plan.partitioningMode == PartitioningMode::Shared
+        && !originalDiskInfo.value(QStringLiteral("gpt")).toBool()) {
+        *error = QObject::tr("The existing GPT partition table could not be verified.");
+        return false;
+    }
+    const QVariantList originalPartitions = originalDiskInfo.value(QStringLiteral("partitions")).toList();
+    report(2, QObject::tr("Preparing storage"), QObject::tr("Applying the approved storage plan…"));
     if (!createPartitions(plan, error)) return false;
-    if (!runPath(QStringLiteral("blockdev"), {QStringLiteral("--rereadpt"), disk}, {}, nullptr, error)
-        || !runPath(QStringLiteral("udevadm"), {QStringLiteral("settle")}, {}, nullptr, error)) return false;
+    if (plan.partitioningMode != PartitioningMode::Manual) {
+        if (!runPath(QStringLiteral("blockdev"), {QStringLiteral("--rereadpt"), disk}, {}, nullptr, error)
+            || !runPath(QStringLiteral("udevadm"), {QStringLiteral("settle")}, {}, nullptr, error)) return false;
+    }
 
-    const QString esp = partitionPath(disk, 1);
-    const QString rootDevice = partitionPath(disk, 2);
-    const QString homePartition = partitionPath(disk, 3);
-    const QString varPartition = partitionPath(disk, 4);
-    const QString swapPartition = partitionPath(disk, 5);
-    const bool encryptHome = plan.partitions.at(1).encrypted;
-    const bool encryptVarLib = plan.partitions.at(2).encrypted;
+    const QString esp = deviceForRole(plan, QStringLiteral("/boot/efi"));
+    const QString rootPartition = deviceForRole(plan, QStringLiteral("/"));
+    const bool encryptRoot = rowForRole(plan, QStringLiteral("/"))
+        .value(QStringLiteral("encrypted")).toBool();
+    const QString rootDevice = encryptRoot ? QStringLiteral("/dev/mapper/nx_root") : rootPartition;
+    const QString homePartition = deviceForRole(plan, QStringLiteral("/home"));
+    const QString varPartition = deviceForRole(plan, QStringLiteral("/var/lib"));
+    const QString swapPartition = deviceForRole(plan, QStringLiteral("swap"));
+    if (esp.isEmpty() || rootDevice.isEmpty()
+        || (plan.partitioningMode != PartitioningMode::Manual
+            && (homePartition.isEmpty() || varPartition.isEmpty()))) {
+        *error = QObject::tr("The approved storage plan is missing a required partition.");
+        return false;
+    }
+    if (plan.partitioningMode == PartitioningMode::Shared) {
+        const QVariantMap diskInfo = SystemDiscovery::inspectTargetDisk(disk, plan.imagePath);
+        if (!diskInfo.value(QStringLiteral("gpt")).toBool()
+            || diskInfo.value(QStringLiteral("tableId")) != originalDiskInfo.value(QStringLiteral("tableId"))) {
+            *error = QObject::tr("The existing GPT partition table changed while adding Nitrux partitions.");
+            return false;
+        }
+        const QVariantList actual = diskInfo.value(QStringLiteral("partitions")).toList();
+        QVariantMap resizeRow;
+        int createdPartitionCount = 0;
+        for (const QVariant& value : plan.storageLayout) {
+            const QVariantMap row = value.toMap();
+            if (row.value(QStringLiteral("action")).toString() == QStringLiteral("resize"))
+                resizeRow = row;
+            else if (row.value(QStringLiteral("action")).toString() == QStringLiteral("create"))
+                ++createdPartitionCount;
+        }
+        if (actual.size() != originalPartitions.size() + createdPartitionCount) {
+            *error = QObject::tr("The target partition table has unexpected changes.");
+            return false;
+        }
+        for (const QVariant& originalValue : originalPartitions) {
+            const QVariantMap original = originalValue.toMap();
+            const QString originalDevice = original.value(QStringLiteral("device")).toString();
+            QVariantMap observed;
+            for (const QVariant& actualValue : actual) {
+                const QVariantMap candidate = actualValue.toMap();
+                if (candidate.value(QStringLiteral("device")).toString() == originalDevice) {
+                    observed = candidate;
+                    break;
+                }
+            }
+            bool preserved = !observed.isEmpty()
+                && observed.value(QStringLiteral("startSector")) == original.value(QStringLiteral("startSector"))
+                && observed.value(QStringLiteral("sectorCount")) == original.value(QStringLiteral("sectorCount"))
+                && observed.value(QStringLiteral("typeGuid")).toString().compare(
+                    original.value(QStringLiteral("typeGuid")).toString(), Qt::CaseInsensitive) == 0
+                && observed.value(QStringLiteral("uuid")) == original.value(QStringLiteral("uuid"))
+                && observed.value(QStringLiteral("attributes")) == original.value(QStringLiteral("attributes"))
+                && observed.value(QStringLiteral("label")) == original.value(QStringLiteral("label"))
+                && observed.value(QStringLiteral("filesystem")) == original.value(QStringLiteral("filesystem"));
+            if (!resizeRow.isEmpty() && originalDevice == resizeRow.value(QStringLiteral("device")).toString()) {
+                preserved = !observed.isEmpty()
+                    && observed.value(QStringLiteral("startSector")) == resizeRow.value(QStringLiteral("startSector"))
+                    && observed.value(QStringLiteral("sectorCount")) == resizeRow.value(QStringLiteral("sectorCount"))
+                    && observed.value(QStringLiteral("typeGuid")).toString().compare(
+                        resizeRow.value(QStringLiteral("typeGuid")).toString(), Qt::CaseInsensitive) == 0
+                    && observed.value(QStringLiteral("uuid")) == original.value(QStringLiteral("uuid"))
+                    && observed.value(QStringLiteral("attributes")) == original.value(QStringLiteral("attributes"))
+                    && observed.value(QStringLiteral("label")) == original.value(QStringLiteral("label"))
+                    && observed.value(QStringLiteral("filesystem")) == original.value(QStringLiteral("filesystem"));
+            }
+            if (!preserved) {
+                *error = QObject::tr("An existing partition changed beyond the approved resize operation.");
+                return false;
+            }
+        }
+        for (const QVariant& value : plan.storageLayout) {
+            const QVariantMap row = value.toMap();
+            if (row.value(QStringLiteral("action")).toString() != QStringLiteral("create"))
+                continue;
+            bool found = false;
+            for (const QVariant& entry : actual) {
+                const QVariantMap observed = entry.toMap();
+                if (observed.value(QStringLiteral("device")) == row.value(QStringLiteral("device"))
+                    && observed.value(QStringLiteral("startSector")) == row.value(QStringLiteral("startSector"))
+                    && observed.value(QStringLiteral("sectorCount")) == row.value(QStringLiteral("sectorCount"))
+                    && observed.value(QStringLiteral("typeGuid")).toString().compare(
+                        row.value(QStringLiteral("typeGuid")).toString(), Qt::CaseInsensitive) == 0
+                    && observed.value(QStringLiteral("label")) == row.value(QStringLiteral("label"))) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                *error = QObject::tr("The created partitions do not match the approved layout.");
+                return false;
+            }
+        }
+    } else if (plan.partitioningMode == PartitioningMode::Manual) {
+        const QVariantMap diskInfo = SystemDiscovery::inspectTargetDisk(disk, plan.imagePath);
+        const QVariantList actual = diskInfo.value(QStringLiteral("partitions")).toList();
+        int expectedCount = 0;
+        for (const QVariant& value : plan.manualPartitionLayout) {
+            const QVariantMap row = value.toMap();
+            if (row.value(QStringLiteral("action")).toString() == QStringLiteral("delete"))
+                continue;
+            ++expectedCount;
+            const QString device = row.value(QStringLiteral("device")).toString();
+            QVariantMap observed;
+            for (const QVariant& actualValue : actual) {
+                const QVariantMap candidate = actualValue.toMap();
+                if (candidate.value(QStringLiteral("device")).toString() == device) {
+                    observed = candidate;
+                    break;
+                }
+            }
+            const QString expectedType = row.value(QStringLiteral("plannedTypeGuid"),
+                row.value(QStringLiteral("typeGuid")).toString()).toString();
+            if (observed.isEmpty()
+                || observed.value(QStringLiteral("startSector")).toULongLong()
+                    != row.value(QStringLiteral("startSector")).toULongLong()
+                || observed.value(QStringLiteral("sectorCount")).toULongLong()
+                    != row.value(QStringLiteral("sectorCount")).toULongLong()
+                || observed.value(QStringLiteral("typeGuid")).toString().compare(expectedType, Qt::CaseInsensitive) != 0
+                || observed.value(QStringLiteral("label")).toString() != row.value(QStringLiteral("label")).toString()
+                || (!row.value(QStringLiteral("uuid")).toString().isEmpty()
+                    && observed.value(QStringLiteral("uuid")).toString() != row.value(QStringLiteral("uuid")).toString())
+                || (!row.value(QStringLiteral("uuid")).toString().isEmpty()
+                    && observed.value(QStringLiteral("attributes")) != row.value(QStringLiteral("attributes")))) {
+                *error = QObject::tr("The applied partition table does not match the reviewed manual layout.");
+                return false;
+            }
+        }
+        if (actual.size() != expectedCount) {
+            *error = QObject::tr("The applied partition count does not match the reviewed manual layout.");
+            return false;
+        }
+    }
+    const bool encryptHome = rowForRole(plan, QStringLiteral("/home"))
+        .value(QStringLiteral("encrypted")).toBool();
+    const bool encryptVarLib = rowForRole(plan, QStringLiteral("/var/lib"))
+        .value(QStringLiteral("encrypted")).toBool();
+    const bool encryptSwap = plan.encryptSwap && !swapPartition.isEmpty();
     const QString homeDevice = encryptHome ? QStringLiteral("/dev/mapper/nx_home") : homePartition;
     const QString varDevice = encryptVarLib ? QStringLiteral("/dev/mapper/nx_var_lib") : varPartition;
+    const QString swapDevice = encryptSwap ? QStringLiteral("/dev/mapper/nx_swap") : swapPartition;
 
-    report(8, QObject::tr("Formatting filesystems"), QObject::tr("Creating the EFI and XFS filesystems…"));
+    report(8, QObject::tr("Formatting filesystems"), QObject::tr("Creating the EFI and encrypted filesystems…"));
     const QString fatFormatter = QStandardPaths::findExecutable(QStringLiteral("mkfs.fat"));
     const QString vfatFormatter = fatFormatter.isEmpty()
         ? QStandardPaths::findExecutable(QStringLiteral("mkfs.vfat")) : fatFormatter;
     if (vfatFormatter.isEmpty()
         || !run(vfatFormatter, {QStringLiteral("-F"), QStringLiteral("32"),
-            QStringLiteral("-n"), QStringLiteral("ESP"), esp}, {}, nullptr, error)
-        || !runPath(QStringLiteral("mkfs.xfs"), {QStringLiteral("-f"), QStringLiteral("-L"),
-            QStringLiteral("NX_ROOT"), rootDevice}, {}, nullptr, error)) return false;
+            QStringLiteral("-n"), labelForRole(plan, QStringLiteral("/boot/efi")), esp}, {}, nullptr, error))
+        return false;
 
     const QString passphrase = plan.encryptionPassphrase;
     CryptMapperGuard mapperGuard;
-    const auto setupEncrypted = [&](bool encrypted, const QString& partition, const QString& mapper,
-                                   const QString& label) -> bool {
-        if (encrypted) {
-            if (!runPath(QStringLiteral("cryptsetup"), {QStringLiteral("luksFormat"), QStringLiteral("--type"),
-                    QStringLiteral("luks2"), QStringLiteral("--pbkdf"), QStringLiteral("argon2id"),
-                    QStringLiteral("--batch-mode"), QStringLiteral("--key-file"), QStringLiteral("-"), partition},
-                    passphrase.toUtf8(), nullptr, error)) return false;
-            if (!runPath(QStringLiteral("cryptsetup"), {QStringLiteral("open"), QStringLiteral("--key-file"),
-                    QStringLiteral("-"), partition, QFileInfo(mapper).fileName()},
-                    passphrase.toUtf8(), nullptr, error)) return false;
-            mapperGuard.opened.append(QFileInfo(mapper).fileName());
-        }
-        return runPath(QStringLiteral("mkfs.f2fs"), {QStringLiteral("-f"), QStringLiteral("-O"),
-                        QStringLiteral("compression"), QStringLiteral("-l"), label,
-                        encrypted ? mapper : partition}, {}, nullptr, error);
+    const auto openEncrypted = [&](bool encrypted, const QString& partition, const QString& mapper) -> bool {
+        if (!encrypted)
+            return true;
+        const QString pbkdf = partition == rootPartition
+            ? QStringLiteral("pbkdf2") : QStringLiteral("argon2id");
+        if (!runPath(QStringLiteral("cryptsetup"), {QStringLiteral("luksFormat"), QStringLiteral("--type"),
+                QStringLiteral("luks2"), QStringLiteral("--pbkdf"), pbkdf,
+                QStringLiteral("--batch-mode"), QStringLiteral("--key-file"), QStringLiteral("-"), partition},
+                passphrase.toUtf8(), nullptr, error)) return false;
+        if (!runPath(QStringLiteral("cryptsetup"), {QStringLiteral("open"), QStringLiteral("--key-file"),
+                QStringLiteral("-"), partition, QFileInfo(mapper).fileName()},
+                passphrase.toUtf8(), nullptr, error)) return false;
+        mapperGuard.opened.append(QFileInfo(mapper).fileName());
+        return true;
     };
-    if (!setupEncrypted(encryptHome, homePartition, homeDevice, QStringLiteral("NX_HOME"))
-        || !setupEncrypted(encryptVarLib, varPartition, varDevice, QStringLiteral("NX_VAR_LIB"))) return false;
-    const QVariantMap swapRow = rowAt(plan, 4);
-    const bool hasSwapPartition = swapRow.value(QStringLiteral("partitionNumber")).toInt() == 5;
-    if (hasSwapPartition && !runPath(QStringLiteral("mkswap"), {QStringLiteral("-L"), QStringLiteral("SWAP"), swapPartition}, {}, nullptr, error))
+    if (!openEncrypted(encryptRoot, rootPartition, rootDevice)
+        || !runPath(QStringLiteral("mkfs.xfs"), {QStringLiteral("-f"), QStringLiteral("-L"),
+            labelForRole(plan, QStringLiteral("/")), rootDevice}, {}, nullptr, error))
+        return false;
+
+    const auto setupF2fs = [&](bool encrypted, const QString& partition, const QString& mapper,
+                               const QString& label) -> bool {
+        return openEncrypted(encrypted, partition, mapper)
+            && runPath(QStringLiteral("mkfs.f2fs"), {QStringLiteral("-f"), QStringLiteral("-O"),
+                QStringLiteral("compression"), QStringLiteral("-l"), label,
+                encrypted ? mapper : partition}, {}, nullptr, error);
+    };
+    if ((!homePartition.isEmpty()
+            && !setupF2fs(encryptHome, homePartition, homeDevice, labelForRole(plan, QStringLiteral("/home"))))
+        || (!varPartition.isEmpty()
+            && !setupF2fs(encryptVarLib, varPartition, varDevice, labelForRole(plan, QStringLiteral("/var/lib"))))
+        || (encryptSwap && !openEncrypted(true, swapPartition, swapDevice)))
+        return false;
+    if (!swapPartition.isEmpty()
+        && !runPath(QStringLiteral("mkswap"), {QStringLiteral("-L"),
+            labelForRole(plan, QStringLiteral("swap")), swapDevice}, {}, nullptr, error))
         return false;
 
     QTemporaryDir target(QStringLiteral("/run/squiddy-target-XXXXXX"));
@@ -507,10 +1057,10 @@ bool InstallationExecutor::execute(const InstallationPlan& plan, const ProgressC
         if (!QDir().mkpath(root + QStringLiteral("/home")) || !QDir().mkpath(root + QStringLiteral("/var/lib"))) {
             *error = QObject::tr("Could not create filesystem mount points."); break;
         }
-        if (!mountDevice(homeDevice, root + QStringLiteral("/home"),
-                {QStringLiteral("defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime")}, &mounts, error)
-            || !mountDevice(varDevice, root + QStringLiteral("/var/lib"),
-                {QStringLiteral("defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime")}, &mounts, error)
+        if ((!homeDevice.isEmpty() && !mountDevice(homeDevice, root + QStringLiteral("/home"),
+                {QStringLiteral("defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime")}, &mounts, error))
+            || (!varDevice.isEmpty() && !mountDevice(varDevice, root + QStringLiteral("/var/lib"),
+                {QStringLiteral("defaults,compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime")}, &mounts, error))
             || !mountDevice(esp, root + QStringLiteral("/boot/efi"), {QStringLiteral("umask=0077")}, &mounts, error)) break;
 
         report(22, QObject::tr("Installing base system"), QObject::tr("Extracting the Nitrux image…"));
@@ -546,7 +1096,10 @@ bool InstallationExecutor::execute(const InstallationPlan& plan, const ProgressC
 
         report(42, QObject::tr("Configuring installed system"), QObject::tr("Writing locale, keyboard, storage, and account settings…"));
         if (!applyConfig(plan, root, esp, rootDevice,
-                encryptHome ? homePartition : QString(), encryptVarLib ? varPartition : QString(), error)) break;
+                encryptRoot ? rootPartition : QString(),
+                encryptHome ? homePartition : QString(),
+                encryptVarLib ? varPartition : QString(),
+                encryptSwap ? swapPartition : QString(), error)) break;
         QString hwclockError;
         if (!chrootRun(root, {QStringLiteral("/usr/sbin/hwclock"), QStringLiteral("--systohc"),
                 QStringLiteral("--utc")}, {}, &hwclockError))
@@ -592,7 +1145,9 @@ bool InstallationExecutor::execute(const InstallationPlan& plan, const ProgressC
             || !chrootRun(root, {QStringLiteral("/usr/sbin/grub-mkconfig"), QStringLiteral("-o"),
                 QStringLiteral("/boot/efi/EFI/Nitrux/grub.cfg")}, {}, error)) break;
         if (!runPath(QStringLiteral("efibootmgr"), {QStringLiteral("--create"), QStringLiteral("--write-signature"),
-                QStringLiteral("--disk"), disk, QStringLiteral("--part"), QStringLiteral("1"),
+                QStringLiteral("--disk"), disk, QStringLiteral("--part"),
+                QString::number(rowForRole(plan, QStringLiteral("/boot/efi"))
+                    .value(QStringLiteral("partitionNumber")).toInt()),
                 QStringLiteral("--label"), QStringLiteral("Nitrux"), QStringLiteral("--loader"),
                 QStringLiteral("\\EFI\\Nitrux\\shimx64.efi")}, {}, nullptr, error)) break;
 

@@ -4,6 +4,17 @@ import QtQuick.Layouts
 import org.mauikit.controls as Maui
 
 StepCard {
+    id: summaryStep
+
+    function hasAssignment(role) {
+        const assignments = installationPlan.manualAssignments
+        for (const device in assignments) {
+            if (assignments[device] === role)
+                return true
+        }
+        return false
+    }
+
     Maui.SectionItem {
         Layout.fillWidth: true
         flat: true
@@ -66,23 +77,69 @@ StepCard {
         Layout.fillWidth: true
         flat: true
         label1.text: qsTr("Partitioning")
-        label2.text: installationPlan.partitioningMode === "automated" ? qsTr("Automated") : qsTr("Manual")
+        label2.text: installationPlan.partitioningMode === "automated" ? qsTr("Use the whole disk")
+            : (installationPlan.partitioningMode === "share" ? qsTr("Install alongside existing partitions")
+                : qsTr("Manual partitioning"))
         label2.wrapMode: Text.Wrap
     }
     Maui.SectionItem {
         Layout.fillWidth: true
         flat: true
         label1.text: qsTr("Filesystem layout")
-        label2.text: installationPlan.partitioningMode === "automated"
-            ? qsTr("/ XFS 23%; /home F2FS 67%; /var/lib F2FS 10%")
-            : qsTr("Manual layout not configured")
+        label2.text: installationPlan.partitioningMode === "manual"
+            ? qsTr("Review the staged partition changes below.")
+            : installationPlan.storageLayout.length > 0
+                ? installationPlan.storageLayout
+                    .filter(partition => partition.partitionNumber > 0 && partition.action !== "resize")
+                    .map(partition => qsTr("%1 %2 (%3)").arg(partition.mountPoint)
+                        .arg(partition.filesystem).arg(partition.label))
+                    .join("; ")
+                : qsTr("The filesystem layout is not available.")
         label2.wrapMode: Text.Wrap
     }
     Maui.SectionItem {
         Layout.fillWidth: true
         flat: true
-        label1.text: qsTr("EFI System Partition")
-        label2.text: qsTr("Mount at /boot/efi; recommended size 100 MiB")
+        visible: installationPlan.partitioningMode === "manual"
+        label1.text: qsTr("Manual partition changes")
+        label2.text: installationPlan.manualPartitionLayout.map(partition => {
+            const action = partition.action === "delete" ? qsTr("Remove")
+                : partition.action === "create" ? qsTr("Create")
+                : partition.action === "resize" ? qsTr("Resize") : qsTr("Keep")
+            const size = partition.action === "delete" ? ""
+                : partition.action === "resize"
+                    ? qsTr(" · %1 → %2 GiB")
+                        .arg((partition.originalSectorCount * installationPlan.logicalBlockSize / 1073741824).toFixed(2))
+                        .arg((partition.sizeBytes / 1073741824).toFixed(2))
+                    : qsTr(" · %1 GiB").arg((partition.sizeBytes / 1073741824).toFixed(2))
+            const role = partition.mountPoint ? qsTr(" · %1").arg(partition.mountPoint) : ""
+            const label = partition.filesystemLabel
+                ? qsTr(" · Label: %1").arg(partition.filesystemLabel) : ""
+            const format = partition.format && partition.action !== "create" ? qsTr(" · Format") : ""
+            const encrypted = partition.encrypted ? qsTr(" · Encrypted") : ""
+            return qsTr("%1: %2%3%4%5%6%7")
+                .arg(partition.device).arg(action).arg(size).arg(role).arg(label).arg(format).arg(encrypted)
+        }).join("; ") || qsTr("No staged partition changes.")
+        label2.wrapMode: Text.Wrap
+    }
+    Maui.SectionItem {
+        Layout.fillWidth: true
+        flat: true
+        visible: installationPlan.partitioningMode === "share"
+            && installationPlan.storageLayout.some(partition =>
+                partition.action === "resize" && partition.reclaimBytes > 0)
+        label1.text: qsTr("Existing partition size")
+        label2.text: {
+            const partition = installationPlan.storageLayout.find(entry =>
+                entry.action === "resize" && entry.reclaimBytes > 0)
+            return partition
+                ? qsTr("%1 (%2): %3 GiB → %4 GiB")
+                    .arg(partition.device)
+                    .arg(partition.filesystem)
+                    .arg((partition.originalSizeBytes / 1073741824).toFixed(2))
+                    .arg((partition.sizeBytes / 1073741824).toFixed(2))
+                : ""
+        }
         label2.wrapMode: Text.Wrap
     }
     Maui.SectionItem {
@@ -109,17 +166,29 @@ StepCard {
     Maui.SectionItem {
         Layout.fillWidth: true
         flat: true
-        label1.text: qsTr("Swap")
-        label2.text: installationPlan.swapChoice
+        visible: installationPlan.partitioningMode !== "manual"
+        label1.text: qsTr("Suspend mode")
+        label2.text: installationPlan.swapChoice === "Suspend"
+            ? qsTr("Hibernation") : qsTr("Suspension")
         label2.wrapMode: Text.Wrap
     }
     Maui.SectionItem {
         Layout.fillWidth: true
         flat: true
         label1.text: qsTr("Encryption")
-        label2.text: qsTr("/home: %1; /var/lib: %2")
-            .arg(installationPlan.encryptHome ? qsTr("On") : qsTr("Off"))
-            .arg(installationPlan.encryptVarLib ? qsTr("On") : qsTr("Off"))
+        label2.text: {
+            if (installationPlan.partitioningMode !== "manual")
+                return installationPlan.encryptInstallation
+                    ? qsTr("All Nitrux partitions encrypted; EFI remains unencrypted.")
+                    : qsTr("Off")
+            const encryptedRoles = []
+            if (installationPlan.encryptRoot && summaryStep.hasAssignment("/")) encryptedRoles.push("/")
+            if (installationPlan.encryptHome && summaryStep.hasAssignment("/home")) encryptedRoles.push("/home")
+            if (installationPlan.encryptVarLib && summaryStep.hasAssignment("/var/lib")) encryptedRoles.push("/var/lib")
+            if (installationPlan.encryptSwap && summaryStep.hasAssignment("swap")) encryptedRoles.push(qsTr("swap"))
+            return encryptedRoles.length > 0
+                ? qsTr("Encrypted: %1").arg(encryptedRoles.join(", ")) : qsTr("Off")
+        }
         label2.wrapMode: Text.Wrap
     }
     Maui.SectionItem {
@@ -165,15 +234,6 @@ StepCard {
                 + (modelData.sizeBytes > 0
                     ? qsTr(" · %1 GiB").arg((modelData.sizeBytes / 1073741824).toFixed(2))
                     : "")
-                + (modelData.sizeBytes > 0 && modelData.sectorCount > 0
-                    ? qsTr(" · start LBA %1, %2 sectors")
-                        .arg(modelData.startSector).arg(modelData.sectorCount)
-                    : "")
-                + (modelData.minimumBytes > 0
-                    ? qsTr(" · estimated image %1 GiB; minimum %2 GiB")
-                        .arg((modelData.estimatedImageBytes / 1073741824).toFixed(2))
-                        .arg((modelData.minimumBytes / 1073741824).toFixed(2))
-                    : "")
                 + (modelData.note ? qsTr(" · %1").arg(modelData.note) : "")
             label2.wrapMode: Text.Wrap
         }
@@ -181,7 +241,7 @@ StepCard {
 
     Label {
         Layout.fillWidth: true
-        text: qsTr("Image sizes are conservative estimates from a read-only file listing. The storage preflight makes no disk changes.")
+        text: qsTr("Storage preflight is read only.")
         wrapMode: Text.Wrap
     }
 
@@ -189,8 +249,17 @@ StepCard {
         Layout.fillWidth: true
         visible: !installationPlan.debugMode
         checked: installationPlan.acknowledgeDiskErasure
-        text: qsTr("I understand that installing will erase all data on %1.")
-            .arg(installationPlan.targetDisk || qsTr("the selected disk"))
+        text: installationPlan.partitioningMode === "automated"
+            ? qsTr("I understand that installing will erase all data on %1.")
+                .arg(installationPlan.targetDisk || qsTr("the selected disk"))
+            : (installationPlan.partitioningMode === "share"
+                ? qsTr("I understand that installing will add and format partitions in unallocated space on %1.")
+                    .arg(installationPlan.targetDisk || qsTr("the selected disk"))
+                : (!installationPlan.targetDiskInfo.gpt
+                    ? qsTr("I understand that installing will replace the partition table and format assigned partitions on %1.")
+                        .arg(installationPlan.targetDisk || qsTr("the selected disk"))
+                    : qsTr("I understand that installing will format the assigned partitions on %1, including the selected EFI partition.")
+                        .arg(installationPlan.targetDisk || qsTr("the selected disk"))))
         onToggled: installationPlan.acknowledgeDiskErasure = checked
     }
 

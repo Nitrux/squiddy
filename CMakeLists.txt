@@ -100,6 +100,7 @@ qt_add_qml_module(squiddy
         qml/WelcomeStep.qml
         qml/UserStep.qml
         qml/PartitioningStep.qml
+        qml/ManualPartitionEditor.qml
         qml/SummaryStep.qml
         qml/DebugSimulationStep.qml
     RESOURCES
@@ -187,7 +188,7 @@ set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "dbus, dosfstools, efibootmgr, f2fs-tools, libpwquality1, locales, mauikit (>= 4.0.0), polkitd, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qml6-module-qtquick-window, squashfs-tools, tzdata, udev, util-linux, xfsprogs, xkb-data")
+    "btrfs-progs, dbus, dosfstools, e2fsprogs, efibootmgr, fatresize, f2fs-tools, libpwquality1, locales, mauikit (>= 4.0.0), ntfs-3g, polkitd, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qml6-module-qtquick-window, squashfs-tools, tzdata, udev, util-linux, xfsprogs, xkb-data")
 set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "dwarfs-tools")
 include(CPack)
 
