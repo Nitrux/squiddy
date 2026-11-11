@@ -7,11 +7,13 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMap>
 #include <QSet>
 #include <QLocale>
 #include <QRegularExpression>
 #include <QTextStream>
 #include <QTimeZone>
+#include <QVariantMap>
 #include <QXmlStreamReader>
 
 #include <limits>
@@ -79,6 +81,8 @@ QString currentLocale(const QStringList& locales)
         if (QLocale(locale).name().compare(requestedName, Qt::CaseInsensitive) == 0)
             return locale;
     }
+    if (locales.contains(QStringLiteral("en_US.UTF-8")))
+        return QStringLiteral("en_US.UTF-8");
     return locales.isEmpty() ? QString() : locales.first();
 }
 
@@ -114,67 +118,152 @@ QStringList supportedTimeZones()
     return zones;
 }
 
-QStringList keyboardLayoutsFromXml(const QString& path)
+struct KeyboardChoices {
+    QMap<QString, QString> layouts;
+    QMap<QString, QMap<QString, QString>> variants;
+    QMap<QString, QString> models;
+    QMap<QString, QString> options;
+};
+
+KeyboardChoices keyboardChoicesFromXml(const QString& path)
 {
-    QStringList layouts;
+    KeyboardChoices choices;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return layouts;
+        return choices;
 
+    enum class Item { None, Model, Layout, Variant, Option };
+    Item item = Item::None;
+    QString currentLayout;
     QXmlStreamReader xml(&file);
     while (!xml.atEnd()) {
         xml.readNext();
-        if (!xml.isStartElement() || xml.name() != QStringLiteral("layout"))
-            continue;
-
-        QString layoutName;
-        while (xml.readNextStartElement()) {
-            if (xml.name() != QStringLiteral("configItem")) {
-                xml.skipCurrentElement();
-                continue;
+        if (xml.isStartElement()) {
+            const auto element = xml.name();
+            if (element == QStringLiteral("model"))
+                item = Item::Model;
+            else if (element == QStringLiteral("layout"))
+                item = Item::Layout;
+            else if (element == QStringLiteral("variant"))
+                item = Item::Variant;
+            else if (element == QStringLiteral("option"))
+                item = Item::Option;
+            else if (element == QStringLiteral("configItem")) {
+                QString code;
+                QString description;
+                while (xml.readNextStartElement()) {
+                    if (xml.name() == QStringLiteral("name"))
+                        code = xml.readElementText().trimmed();
+                    else if (xml.name() == QStringLiteral("description") && description.isEmpty())
+                        description = xml.readElementText().trimmed();
+                    else
+                        xml.skipCurrentElement();
+                }
+                if (code.isEmpty())
+                    continue;
+                if (description.isEmpty())
+                    description = code;
+                switch (item) {
+                case Item::Model:
+                    choices.models.insert(code, description);
+                    break;
+                case Item::Layout:
+                    currentLayout = code;
+                    choices.layouts.insert(code, description);
+                    break;
+                case Item::Variant:
+                    if (!currentLayout.isEmpty())
+                        choices.variants[currentLayout].insert(code, description);
+                    break;
+                case Item::Option:
+                    choices.options.insert(code, description);
+                    break;
+                case Item::None:
+                    break;
+                }
             }
-            while (xml.readNextStartElement()) {
-                if (xml.name() == QStringLiteral("name"))
-                    layoutName = xml.readElementText().trimmed();
-                else
-                    xml.skipCurrentElement();
+        } else if (xml.isEndElement()) {
+            const auto element = xml.name();
+            if (element == QStringLiteral("variant"))
+                item = Item::Layout;
+            else if (element == QStringLiteral("layout")) {
+                currentLayout.clear();
+                item = Item::None;
+            } else if (element == QStringLiteral("model")
+                       || element == QStringLiteral("option")) {
+                item = Item::None;
             }
         }
-        if (!layoutName.isEmpty() && !layouts.contains(layoutName))
-            layouts.append(layoutName);
     }
 
-    if (xml.hasError())
-        layouts.clear();
-    layouts.sort();
-    return layouts;
+    return xml.hasError() ? KeyboardChoices{} : choices;
 }
 
-QStringList keyboardLayoutsFromList(const QString& path)
+KeyboardChoices keyboardChoicesFromList(const QString& path)
 {
-    QStringList layouts;
+    KeyboardChoices choices;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return layouts;
+        return choices;
 
+    enum class Section { None, Model, Layout, Variant, Option };
+    Section section = Section::None;
     QTextStream stream(&file);
-    bool readingLayouts = false;
-    static const QRegularExpression layoutLine(QStringLiteral("^\\s*([^\\s]+)\\s+.+$"));
+    static const QRegularExpression choiceLine(QStringLiteral("^\\s*([^\\s]+)\\s+(.+)$"));
     while (!stream.atEnd()) {
         const QString line = stream.readLine();
         const QString trimmed = line.trimmed();
-        if (trimmed.startsWith(QStringLiteral("!"))) {
-            readingLayouts = trimmed == QStringLiteral("! layout");
+        if (trimmed.startsWith(QLatin1Char('!'))) {
+            const QString heading = trimmed.mid(1).trimmed();
+            section = heading == QStringLiteral("model") ? Section::Model
+                : heading == QStringLiteral("layout") ? Section::Layout
+                : heading == QStringLiteral("variant") ? Section::Variant
+                : heading == QStringLiteral("option") ? Section::Option
+                : Section::None;
             continue;
         }
-        if (!readingLayouts)
+        const auto match = choiceLine.match(line);
+        if (!match.hasMatch())
             continue;
-        const auto match = layoutLine.match(line);
-        if (match.hasMatch() && !layouts.contains(match.captured(1)))
-            layouts.append(match.captured(1));
+        const QString code = match.captured(1);
+        const QString description = match.captured(2).trimmed();
+        switch (section) {
+        case Section::Model:
+            choices.models.insert(code, description);
+            break;
+        case Section::Layout:
+            choices.layouts.insert(code, description);
+            break;
+        case Section::Variant: {
+            const qsizetype separator = description.indexOf(QLatin1Char(':'));
+            if (separator > 0) {
+                const QString layout = description.left(separator).trimmed();
+                const QString variant = description.mid(separator + 1).trimmed();
+                if (!layout.isEmpty() && !variant.isEmpty())
+                    choices.variants[layout].insert(code, variant);
+            }
+            break;
+        }
+        case Section::Option:
+            choices.options.insert(code, description);
+            break;
+        case Section::None:
+            break;
+        }
     }
-    layouts.sort();
-    return layouts;
+    return choices;
+}
+
+QVariantList keyboardOptions(const QMap<QString, QString>& choices)
+{
+    QVariantList options;
+    for (auto it = choices.cbegin(); it != choices.cend(); ++it) {
+        options.append(QVariantMap{
+            {QStringLiteral("text"), it.value()},
+            {QStringLiteral("value"), it.key()}
+        });
+    }
+    return options;
 }
 
 QString currentKeyboardLayout()
@@ -390,17 +479,31 @@ SystemDiscoveryResults SystemDiscovery::discover()
     result.timeZones = supportedTimeZones();
     result.defaultTimeZone = currentTimeZone(result.timeZones);
 
-    result.keyboardLayouts = keyboardLayoutsFromXml(
+    KeyboardChoices keyboard = keyboardChoicesFromXml(
         QStringLiteral("/usr/share/X11/xkb/rules/evdev.xml"));
-    if (result.keyboardLayouts.isEmpty())
-        result.keyboardLayouts = keyboardLayoutsFromList(
+    if (keyboard.layouts.isEmpty() || keyboard.models.isEmpty()
+        || keyboard.options.isEmpty() || keyboard.variants.isEmpty()) {
+        KeyboardChoices fallback = keyboardChoicesFromList(
             QStringLiteral("/usr/share/X11/xkb/rules/evdev.lst"));
-    if (result.keyboardLayouts.isEmpty())
-        result.keyboardLayouts = keyboardLayoutsFromList(
-            QStringLiteral("/usr/share/X11/xkb/rules/base.lst"));
+        if (fallback.layouts.isEmpty())
+            fallback = keyboardChoicesFromList(
+                QStringLiteral("/usr/share/X11/xkb/rules/base.lst"));
+        if (keyboard.layouts.isEmpty()) keyboard.layouts = fallback.layouts;
+        if (keyboard.models.isEmpty()) keyboard.models = fallback.models;
+        if (keyboard.options.isEmpty()) keyboard.options = fallback.options;
+        if (keyboard.variants.isEmpty()) keyboard.variants = fallback.variants;
+    }
+    result.keyboardLayouts = keyboard.layouts.keys();
+    result.keyboardLayoutOptions = keyboardOptions(keyboard.layouts);
+    result.keyboardModelOptions = keyboardOptions(keyboard.models);
+    result.keyboardOptionOptions = keyboardOptions(keyboard.options);
+    for (auto it = keyboard.variants.cbegin(); it != keyboard.variants.cend(); ++it)
+        result.keyboardVariantOptionsByLayout.insert(it.key(), QVariant::fromValue(keyboardOptions(it.value())));
     const QString defaultLayout = currentKeyboardLayout();
     if (result.keyboardLayouts.contains(defaultLayout))
         result.defaultKeyboardLayout = defaultLayout;
+    else if (result.keyboardLayouts.contains(QStringLiteral("us")))
+        result.defaultKeyboardLayout = QStringLiteral("us");
     else if (!result.keyboardLayouts.isEmpty())
         result.defaultKeyboardLayout = result.keyboardLayouts.first();
 

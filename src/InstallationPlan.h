@@ -83,7 +83,13 @@ class InstallationPlanController final : public QObject
     Q_PROPERTY(QStringList availableLanguages READ availableLanguages NOTIFY choicesChanged)
     Q_PROPERTY(QStringList availableLocales READ availableLocales NOTIFY choicesChanged)
     Q_PROPERTY(QStringList availableTimeZones READ availableTimeZones NOTIFY choicesChanged)
+    Q_PROPERTY(QVariantList timeZoneRegionOptions READ timeZoneRegionOptions NOTIFY choicesChanged)
+    Q_PROPERTY(QString timeZoneRegion READ timeZoneRegion NOTIFY planChanged)
     Q_PROPERTY(QStringList availableKeyboardLayouts READ availableKeyboardLayouts NOTIFY choicesChanged)
+    Q_PROPERTY(QVariantList keyboardLayoutOptions READ keyboardLayoutOptions NOTIFY choicesChanged)
+    Q_PROPERTY(QVariantList keyboardVariantOptions READ keyboardVariantOptions NOTIFY planChanged)
+    Q_PROPERTY(QVariantList keyboardModelOptions READ keyboardModelOptions NOTIFY choicesChanged)
+    Q_PROPERTY(QVariantList keyboardOptionOptions READ keyboardOptionOptions NOTIFY choicesChanged)
     Q_PROPERTY(QStringList availableTargetDisks READ availableTargetDisks NOTIFY choicesChanged)
     Q_PROPERTY(QString imagePath READ imagePath NOTIFY planChanged)
     Q_PROPERTY(QString imageFormat READ imageFormat NOTIFY planChanged)
@@ -125,12 +131,23 @@ public:
     QStringList availableLanguages() const;
     QStringList availableLocales() const;
     QStringList availableTimeZones() const;
+    QVariantList timeZoneRegionOptions() const;
+    QString timeZoneRegion() const;
+    Q_INVOKABLE QVariantList timeZoneOptionsForRegion(const QString& region) const;
     QStringList availableKeyboardLayouts() const;
+    QVariantList keyboardLayoutOptions() const;
+    QVariantList keyboardVariantOptions() const;
+    QVariantList keyboardModelOptions() const;
+    QVariantList keyboardOptionOptions() const;
     QStringList availableTargetDisks() const;
     void setAvailableLanguages(const QStringList& choices);
     void setAvailableLocales(const QStringList& choices);
     void setAvailableTimeZones(const QStringList& choices);
     void setAvailableKeyboardLayouts(const QStringList& choices);
+    void setKeyboardLayoutOptions(const QVariantList& options);
+    void setKeyboardAdvancedOptions(const QVariantMap& variantsByLayout,
+                                    const QVariantList& models,
+                                    const QVariantList& options);
     // The discovery provider supplies only disks that passed GPT suitability checks.
     void setAvailableTargetDisks(const QStringList& choices);
     QString imagePath() const;
@@ -141,6 +158,10 @@ public:
 
     QString language() const;
     void setLanguage(const QString& value);
+    Q_INVOKABLE void selectLanguage(const QString& value, const QString& preferredLocale);
+    Q_INVOKABLE void markRegionalSettingsChanged();
+    void applyLanguageDefaults(const QString& value, const QString& preferredLocale);
+    Q_INVOKABLE bool regionalSettingsChangedByUser() const;
     QString locale() const;
     void setLocale(const QString& value);
     QString timeZone() const;
@@ -211,6 +232,10 @@ private:
     QStringList m_availableLocales;
     QStringList m_availableTimeZones;
     QStringList m_availableKeyboardLayouts;
+    QVariantList m_keyboardLayoutOptions;
+    QVariantMap m_keyboardVariantOptionsByLayout;
+    QVariantList m_keyboardModelOptions;
+    QVariantList m_keyboardOptionOptions;
     QStringList m_availableTargetDisks;
     QString m_imagePath;
     QString m_imageFormat;
@@ -218,6 +243,7 @@ private:
     bool m_uefiEnvironmentDetected = false;
 
     QString m_language;
+    bool m_regionalSettingsChangedByUser = false;
     QString m_locale;
     QString m_timeZone;
     QString m_keyboardLayout;

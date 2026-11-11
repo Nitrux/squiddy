@@ -8,13 +8,19 @@
 #include <pwquality.h>
 
 #include <QByteArray>
+#include <QFile>
 #include <QFileInfo>
+#include <QLocale>
+#include <QMap>
 #include <QRegularExpression>
+#include <QStringView>
+#include <QTimeZone>
 #include <QMetaObject>
 #include <QPointer>
 #include <QRunnable>
 #include <QThreadPool>
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <utility>
@@ -24,6 +30,14 @@ namespace {
 bool containsValue(const QStringList& choices, const QString& value)
 {
     return !value.isEmpty() && choices.contains(value);
+}
+
+QString timeZoneRegionForId(const QString& id)
+{
+    if (id == QStringLiteral("UTC"))
+        return QStringLiteral("UTC");
+    const QString code = QLocale::territoryToCode(QTimeZone(id.toUtf8()).territory());
+    return code.size() == 2 ? code : QStringLiteral("OTHER");
 }
 
 QString passwordQualityError(const QString& password, const QString& username)
@@ -67,8 +81,22 @@ InstallationPlanController::InstallationPlanController(bool debugMode, QObject* 
     if (m_debugMode) {
         m_availableLanguages = {tr("English (United States)"), tr("Spanish (Mexico)")};
         m_availableLocales = {QStringLiteral("en_US.UTF-8"), QStringLiteral("es_MX.UTF-8")};
-        m_availableTimeZones = {QStringLiteral("America/Mexico_City"), QStringLiteral("UTC")};
+        m_availableTimeZones = {QStringLiteral("America/Mexico_City"),
+                                QStringLiteral("America/New_York"), QStringLiteral("UTC")};
         m_availableKeyboardLayouts = {tr("English (US)"), tr("Spanish (Latin American)")};
+        m_keyboardLayoutOptions = {
+            QVariantMap{{QStringLiteral("text"), tr("English (US)")}, {QStringLiteral("value"), m_availableKeyboardLayouts.at(0)}},
+            QVariantMap{{QStringLiteral("text"), tr("Spanish (Latin American)")}, {QStringLiteral("value"), m_availableKeyboardLayouts.at(1)}}
+        };
+        m_keyboardVariantOptionsByLayout.insert(m_availableKeyboardLayouts.at(0), QVariantList{
+            QVariantMap{{QStringLiteral("text"), tr("English (US, international)")}, {QStringLiteral("value"), QStringLiteral("intl")}}
+        });
+        m_keyboardModelOptions = {
+            QVariantMap{{QStringLiteral("text"), tr("Generic 105-key PC")}, {QStringLiteral("value"), QStringLiteral("pc105")}}
+        };
+        m_keyboardOptionOptions = {
+            QVariantMap{{QStringLiteral("text"), tr("Right Alt as Compose")}, {QStringLiteral("value"), QStringLiteral("compose:ralt")}}
+        };
         m_availableTargetDisks = {tr("Debug virtual disk (64 GiB)"), tr("Debug virtual disk (128 GiB)")};
         m_imagePath = QStringLiteral("debug://nitrux-base.squashfs");
         m_imageFormat = QStringLiteral("SquashFS");
@@ -77,7 +105,7 @@ InstallationPlanController::InstallationPlanController(bool debugMode, QObject* 
 
         m_language = m_availableLanguages.first();
         m_locale = m_availableLocales.first();
-        m_timeZone = m_availableTimeZones.first();
+        m_timeZone = QStringLiteral("America/New_York");
         m_keyboardLayout = m_availableKeyboardLayouts.first();
         m_fullName = tr("Debug User");
         m_username = QStringLiteral("debuguser");
@@ -99,7 +127,96 @@ bool InstallationPlanController::debugMode() const { return m_debugMode; }
 QStringList InstallationPlanController::availableLanguages() const { return m_availableLanguages; }
 QStringList InstallationPlanController::availableLocales() const { return m_availableLocales; }
 QStringList InstallationPlanController::availableTimeZones() const { return m_availableTimeZones; }
+QString InstallationPlanController::timeZoneRegion() const { return timeZoneRegionForId(m_timeZone); }
+QVariantList InstallationPlanController::timeZoneRegionOptions() const
+{
+    QMap<QString, QString> labels;
+    for (const QString& id : m_availableTimeZones) {
+        const QString region = timeZoneRegionForId(id);
+        if (labels.contains(region))
+            continue;
+        const QString text = region == QStringLiteral("UTC") ? tr("UTC")
+            : region == QStringLiteral("OTHER") ? tr("Other time zones")
+            : QLocale::territoryToString(QLocale::codeToTerritory(QStringView(region)));
+        labels.insert(region, text);
+    }
+
+    QVariantList options;
+    for (auto it = labels.cbegin(); it != labels.cend(); ++it)
+        options.append(QVariantMap{{QStringLiteral("text"), it.value()},
+                                   {QStringLiteral("value"), it.key()}});
+    std::sort(options.begin(), options.end(), [](const QVariant& a, const QVariant& b) {
+        const QVariantMap left = a.toMap();
+        const QVariantMap right = b.toMap();
+        const QString leftRegion = left.value(QStringLiteral("value")).toString();
+        const QString rightRegion = right.value(QStringLiteral("value")).toString();
+        if (leftRegion == rightRegion)
+            return false;
+        if (leftRegion == QStringLiteral("UTC") || rightRegion == QStringLiteral("UTC"))
+            return leftRegion == QStringLiteral("UTC");
+        if (leftRegion == QStringLiteral("OTHER") || rightRegion == QStringLiteral("OTHER"))
+            return rightRegion == QStringLiteral("OTHER");
+        return QString::localeAwareCompare(left.value(QStringLiteral("text")).toString(),
+                                           right.value(QStringLiteral("text")).toString()) < 0;
+    });
+    return options;
+}
+
+QVariantList InstallationPlanController::timeZoneOptionsForRegion(const QString& region) const
+{
+    QVariantList options;
+    for (const QString& id : m_availableTimeZones) {
+        if (timeZoneRegionForId(id) != region)
+            continue;
+        QString text = id == QStringLiteral("UTC") ? tr("UTC") : id.section(QLatin1Char('/'), 1);
+        if (text.isEmpty())
+            text = id;
+        text.replace(QLatin1Char('_'), QLatin1Char(' '));
+        text.replace(QLatin1Char('/'), QStringLiteral(" / "));
+        options.append(QVariantMap{{QStringLiteral("text"), text},
+                                   {QStringLiteral("value"), id}});
+    }
+
+    QString preferred = timeZoneRegionForId(m_timeZone) == region ? m_timeZone : QString();
+    if (preferred.isEmpty() && region.size() == 2) {
+        QFile zoneTable(QStringLiteral("/usr/share/zoneinfo/zone.tab"));
+        if (zoneTable.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            while (!zoneTable.atEnd()) {
+                const QList<QByteArray> fields = zoneTable.readLine().trimmed().split('\t');
+                if (fields.size() >= 3 && fields.at(0) == region.toUtf8()) {
+                    const QString id = QString::fromUtf8(fields.at(2));
+                    if (m_availableTimeZones.contains(id)) {
+                        preferred = id;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    std::sort(options.begin(), options.end(), [&preferred](const QVariant& a, const QVariant& b) {
+        const QVariantMap left = a.toMap();
+        const QVariantMap right = b.toMap();
+        const QString leftId = left.value(QStringLiteral("value")).toString();
+        const QString rightId = right.value(QStringLiteral("value")).toString();
+        if (leftId == rightId)
+            return false;
+        if (leftId == preferred || rightId == preferred)
+            return leftId == preferred;
+        const int order = QString::localeAwareCompare(left.value(QStringLiteral("text")).toString(),
+                                                      right.value(QStringLiteral("text")).toString());
+        return order == 0 ? leftId < rightId : order < 0;
+    });
+    return options;
+}
+
 QStringList InstallationPlanController::availableKeyboardLayouts() const { return m_availableKeyboardLayouts; }
+QVariantList InstallationPlanController::keyboardLayoutOptions() const { return m_keyboardLayoutOptions; }
+QVariantList InstallationPlanController::keyboardVariantOptions() const
+{
+    return m_keyboardVariantOptionsByLayout.value(m_keyboardLayout).toList();
+}
+QVariantList InstallationPlanController::keyboardModelOptions() const { return m_keyboardModelOptions; }
+QVariantList InstallationPlanController::keyboardOptionOptions() const { return m_keyboardOptionOptions; }
 QStringList InstallationPlanController::availableTargetDisks() const { return m_availableTargetDisks; }
 
 void InstallationPlanController::setAvailableLanguages(const QStringList& choices)
@@ -130,6 +247,26 @@ void InstallationPlanController::setAvailableKeyboardLayouts(const QStringList& 
 {
     if (m_debugMode || m_availableKeyboardLayouts == choices) return;
     m_availableKeyboardLayouts = choices;
+    Q_EMIT choicesChanged();
+    invalidatePlan();
+}
+
+void InstallationPlanController::setKeyboardLayoutOptions(const QVariantList& options)
+{
+    if (m_debugMode || m_keyboardLayoutOptions == options) return;
+    m_keyboardLayoutOptions = options;
+    Q_EMIT choicesChanged();
+}
+
+void InstallationPlanController::setKeyboardAdvancedOptions(const QVariantMap& variantsByLayout,
+                                                           const QVariantList& models,
+                                                           const QVariantList& options)
+{
+    if (m_debugMode || (m_keyboardVariantOptionsByLayout == variantsByLayout
+        && m_keyboardModelOptions == models && m_keyboardOptionOptions == options)) return;
+    m_keyboardVariantOptionsByLayout = variantsByLayout;
+    m_keyboardModelOptions = models;
+    m_keyboardOptionOptions = options;
     Q_EMIT choicesChanged();
     invalidatePlan();
 }
@@ -179,6 +316,137 @@ void InstallationPlanController::setLanguage(const QString& value)
     invalidatePlan();
 }
 
+void InstallationPlanController::selectLanguage(const QString& value, const QString& preferredLocale)
+{
+    markRegionalSettingsChanged();
+    applyLanguageDefaults(value, preferredLocale);
+}
+
+void InstallationPlanController::markRegionalSettingsChanged()
+{
+    m_regionalSettingsChangedByUser = true;
+}
+
+bool InstallationPlanController::regionalSettingsChangedByUser() const
+{
+    return m_regionalSettingsChangedByUser;
+}
+
+void InstallationPlanController::applyLanguageDefaults(const QString& value, const QString& preferredLocale)
+{
+    if (!m_availableLanguages.contains(value))
+        return;
+
+    QLocale::Language selectedLanguage = QLocale::AnyLanguage;
+    auto matchesLanguage = [&](const QString& localeName) {
+        const QLocale::Language language = QLocale(localeName).language();
+        const QString name = QLocale::languageToString(language);
+        if (value == name || value.startsWith(name + QStringLiteral(" ("))) {
+            selectedLanguage = language;
+            return true;
+        }
+        return false;
+    };
+
+    QString selectedLocale;
+    if (m_availableLocales.contains(preferredLocale) && matchesLanguage(preferredLocale))
+        selectedLocale = preferredLocale;
+    if (selectedLocale.isEmpty() && m_availableLocales.contains(m_locale)
+        && m_locale.contains(QStringLiteral(".UTF-8"), Qt::CaseInsensitive)
+        && matchesLanguage(m_locale))
+        selectedLocale = m_locale;
+    if (selectedLocale.isEmpty()) {
+        for (const QString& candidate : m_availableLocales) {
+            if (candidate.contains(QStringLiteral(".UTF-8"), Qt::CaseInsensitive)
+                && matchesLanguage(candidate)) {
+                selectedLanguage = QLocale(candidate).language();
+                break;
+            }
+        }
+        if (selectedLanguage != QLocale::AnyLanguage) {
+            const QLocale::Territory likelyTerritory = QLocale(selectedLanguage).territory();
+            for (const QString& candidate : m_availableLocales) {
+                const QLocale locale(candidate);
+                if (candidate.contains(QStringLiteral(".UTF-8"), Qt::CaseInsensitive)
+                    && locale.language() == selectedLanguage
+                    && locale.territory() == likelyTerritory) {
+                    selectedLocale = candidate;
+                    break;
+                }
+            }
+            if (selectedLocale.isEmpty()) {
+                for (const QString& candidate : m_availableLocales) {
+                    if (candidate.contains(QStringLiteral(".UTF-8"), Qt::CaseInsensitive)
+                        && QLocale(candidate).language() == selectedLanguage) {
+                        selectedLocale = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    setLanguage(value);
+    if (selectedLocale.isEmpty())
+        return;
+    setLocale(selectedLocale);
+
+    const QLocale locale(selectedLocale);
+    const QLocale::Territory territory = locale.territory();
+    if (territory == QLocale::AnyTerritory)
+        return;
+    const QString countryCode = QLocale::territoryToCode(territory);
+
+    QStringList layoutCandidates;
+    if (locale.language() == QLocale::Spanish && territory != QLocale::Spain)
+        layoutCandidates.append(QStringLiteral("latam"));
+    layoutCandidates.append(countryCode.toLower());
+    layoutCandidates.append(QLocale::languageToCode(locale.language(), QLocale::ISO639Part1));
+    layoutCandidates.append(QLocale::languageToCode(locale.language(), QLocale::ISO639Alpha3));
+    for (const QString& candidate : layoutCandidates) {
+        if (m_availableKeyboardLayouts.contains(candidate)) {
+            setKeyboardLayout(candidate);
+            break;
+        }
+    }
+    if (m_debugMode && !m_availableKeyboardLayouts.isEmpty()) {
+        if (locale.language() == QLocale::English)
+            setKeyboardLayout(m_availableKeyboardLayouts.first());
+        else if (locale.language() == QLocale::Spanish && m_availableKeyboardLayouts.size() > 1)
+            setKeyboardLayout(m_availableKeyboardLayouts.at(1));
+    }
+    if (m_debugMode) {
+        const QString zone = territory == QLocale::Mexico
+            ? QStringLiteral("America/Mexico_City") : QStringLiteral("America/New_York");
+        if (m_availableTimeZones.contains(zone))
+            setTimeZone(zone);
+        return;
+    }
+
+    if (QTimeZone(m_timeZone.toUtf8()).territory() == territory)
+        return;
+    QFile zoneTable(QStringLiteral("/usr/share/zoneinfo/zone.tab"));
+    if (zoneTable.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!zoneTable.atEnd()) {
+            const QList<QByteArray> fields = zoneTable.readLine().trimmed().split('\t');
+            if (fields.size() >= 3 && fields.at(0) == countryCode.toUtf8()) {
+                const QString zone = QString::fromUtf8(fields.at(2));
+                if (m_availableTimeZones.contains(zone)) {
+                    setTimeZone(zone);
+                    return;
+                }
+            }
+        }
+    }
+    for (const QByteArray& zoneId : QTimeZone::availableTimeZoneIds(territory)) {
+        const QString zone = QString::fromUtf8(zoneId);
+        if (m_availableTimeZones.contains(zone)) {
+            setTimeZone(zone);
+            return;
+        }
+    }
+}
+
 QString InstallationPlanController::locale() const { return m_locale; }
 void InstallationPlanController::setLocale(const QString& value)
 {
@@ -200,6 +468,7 @@ void InstallationPlanController::setKeyboardLayout(const QString& value)
 {
     if (m_keyboardLayout == value) return;
     m_keyboardLayout = value;
+    m_keyboardVariant.clear();
     invalidatePlan();
 }
 

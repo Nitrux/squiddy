@@ -23,8 +23,8 @@ set(REQUIRED_QT_VERSION 6.9)
 set(REQUIRED_KF6_VERSION 6.13.0)
 set(REQUIRED_MAUIKIT_VERSION 4.0.5)
 
-find_package(Qt6 ${REQUIRED_QT_VERSION} REQUIRED COMPONENTS Core Gui Qml Quick DBus)
-find_package(KF6 ${REQUIRED_KF6_VERSION} REQUIRED COMPONENTS CoreAddons)
+find_package(Qt6 ${REQUIRED_QT_VERSION} REQUIRED COMPONENTS Core Gui Qml Quick DBus Network)
+find_package(KF6 ${REQUIRED_KF6_VERSION} REQUIRED COMPONENTS CoreAddons I18n)
 find_package(MauiKit4 ${REQUIRED_MAUIKIT_VERSION} REQUIRED)
 ecm_find_qmlmodule(org.mauikit.controls 1.0)
 
@@ -78,6 +78,8 @@ qt_add_executable(squiddy
     src/InstallationPlan.h
     src/SystemDiscovery.cpp
     src/SystemDiscovery.h
+    src/SystemStatus.cpp
+    src/SystemStatus.h
     src/StoragePreflight.cpp
     src/PrivilegedInstallerClient.cpp
     src/PrivilegedInstallerClient.h
@@ -96,12 +98,12 @@ qt_add_qml_module(squiddy
         qml/main.qml
         qml/StepCard.qml
         qml/WelcomeStep.qml
-        qml/LocaleStep.qml
-        qml/KeyboardStep.qml
         qml/UserStep.qml
         qml/PartitioningStep.qml
         qml/SummaryStep.qml
         qml/DebugSimulationStep.qml
+    RESOURCES
+        data/squiddy_welcome_logo.svg
 )
 
 qt_add_executable(squiddy-installer-helper
@@ -135,7 +137,10 @@ target_link_libraries(squiddy
         Qt6::Qml
         Qt6::Quick
         Qt6::DBus
+        Qt6::Network
         KF6::CoreAddons
+        KF6::I18n
+        KF6::I18nQml
         MauiKit4
         PkgConfig::PWQUALITY
 )

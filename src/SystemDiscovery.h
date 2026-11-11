@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
+#include <QVariantMap>
 
 struct SystemDiscoveryResults {
     bool uefiEnvironmentDetected = false;
@@ -15,6 +16,10 @@ struct SystemDiscoveryResults {
     QStringList locales;
     QStringList timeZones;
     QStringList keyboardLayouts;
+    QVariantList keyboardLayoutOptions;
+    QVariantMap keyboardVariantOptionsByLayout;
+    QVariantList keyboardModelOptions;
+    QVariantList keyboardOptionOptions;
     QStringList targetDisks;
     QString defaultLanguage;
     QString defaultLocale;
