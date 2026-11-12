@@ -278,7 +278,7 @@ Maui.ApplicationWindow {
                     text1: nitruxVersion.length > 0
                         ? qsTr("Welcome to Nitrux %1").arg(nitruxVersion)
                         : qsTr("Welcome to Nitrux")
-                    text2: qsTr("Use this live system now or install Nitrux.")
+                    text2: qsTr("You can use this live media to install Nitrux or use it as a temporary system. You can start the installation anytime by launching the installer.")
                     label1.font.weight: Font.Normal
                     label1.font.pointSize: Maui.Style.fontSizes.enormous * 2
                     label1.wrapMode: Text.WordWrap
