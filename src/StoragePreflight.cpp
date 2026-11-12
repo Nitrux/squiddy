@@ -322,6 +322,75 @@ QVariantMap SystemDiscovery::inspectTargetDisk(const QString& devicePath, const 
                      {QStringLiteral("sizeBytes"), QVariant::fromValue<qulonglong>(bytes)},
                      {QStringLiteral("sectorSize"), QVariant::fromValue<qulonglong>(sector)},
                      {QStringLiteral("gpt"), false}};
+    QVariantList sysfsPartitions;
+    QDirIterator blockDevices(QStringLiteral("/sys/class/block"),
+                              QDir::Dirs | QDir::NoDotAndDotDot);
+    while (blockDevices.hasNext()) {
+        const QString partitionSysfs = blockDevices.next();
+        const QString partitionName = QFileInfo(partitionSysfs).fileName();
+        if (!partitionName.startsWith(name))
+            continue;
+        bool numberOk = false;
+        bool startOk = false;
+        bool sizeOk = false;
+        const int number = readText(partitionSysfs + QStringLiteral("/partition")).toInt(&numberOk);
+        const quint64 start512 = readText(partitionSysfs + QStringLiteral("/start")).toULongLong(&startOk);
+        const quint64 size512 = readText(partitionSysfs + QStringLiteral("/size")).toULongLong(&sizeOk);
+        if (!numberOk || !startOk || !sizeOk || number < 1 || size512 == 0
+            || start512 > std::numeric_limits<quint64>::max() / 512
+            || size512 > std::numeric_limits<quint64>::max() / 512)
+            continue;
+        const quint64 startBytes = start512 * 512;
+        const quint64 partitionBytes = size512 * 512;
+        if (startBytes % sector != 0 || partitionBytes % sector != 0)
+            continue;
+        const QString node = QStringLiteral("/dev/") + partitionName;
+        if (!QFileInfo(node).exists())
+            continue;
+        QString filesystem;
+        QString label;
+        const QString blkid = QStandardPaths::findExecutable(QStringLiteral("blkid"));
+        if (!blkid.isEmpty()) {
+            QProcess probe;
+            probe.setProgram(blkid);
+            probe.setArguments({QStringLiteral("--probe"), QStringLiteral("--output"),
+                                QStringLiteral("export"), node});
+            probe.start();
+            if (probe.waitForStarted() && probe.waitForFinished(5000)
+                && probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0) {
+                const QStringList fields = QString::fromLocal8Bit(probe.readAllStandardOutput())
+                    .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+                for (const QString& field : fields) {
+                    if (field.startsWith(QStringLiteral("TYPE=")))
+                        filesystem = field.mid(5).toLower();
+                    else if (field.startsWith(QStringLiteral("LABEL=")))
+                        label = field.mid(6);
+                }
+            }
+        }
+        const bool shrinkable = filesystem == QStringLiteral("ext2")
+            || filesystem == QStringLiteral("ext3") || filesystem == QStringLiteral("ext4")
+            || filesystem == QStringLiteral("btrfs") || filesystem == QStringLiteral("ntfs")
+            || filesystem == QStringLiteral("vfat") || filesystem == QStringLiteral("swap");
+        sysfsPartitions.append(QVariantMap{
+            {QStringLiteral("device"), node},
+            {QStringLiteral("partitionNumber"), number},
+            {QStringLiteral("filesystem"), filesystem},
+            {QStringLiteral("shrinkable"), shrinkable},
+            {QStringLiteral("startSector"), QVariant::fromValue<qulonglong>(startBytes / sector)},
+            {QStringLiteral("sectorCount"), QVariant::fromValue<qulonglong>(partitionBytes / sector)},
+            {QStringLiteral("sizeBytes"), QVariant::fromValue<qulonglong>(partitionBytes)},
+            {QStringLiteral("typeGuid"), QString()},
+            {QStringLiteral("uuid"), QString()},
+            {QStringLiteral("attributes"), QString()},
+            {QStringLiteral("label"), label}
+        });
+    }
+    std::sort(sysfsPartitions.begin(), sysfsPartitions.end(), [](const QVariant& left, const QVariant& right) {
+        return left.toMap().value(QStringLiteral("partitionNumber")).toInt()
+            < right.toMap().value(QStringLiteral("partitionNumber")).toInt();
+    });
+    info.insert(QStringLiteral("partitions"), sysfsPartitions);
     const QString executable = QStandardPaths::findExecutable(QStringLiteral("sfdisk"));
     if (executable.isEmpty())
         return info;

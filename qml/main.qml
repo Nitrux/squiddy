@@ -25,9 +25,19 @@ Maui.ApplicationWindow {
     ]
 
     property int currentStep: 0
+    property int footerStep: 0
     property bool simulationActive: false
     property bool showingIntro: true
-    onCurrentStepChanged: if (currentStep === 3) installationPlan.runStoragePreflight()
+    onCurrentStepChanged: {
+        if (currentStep === 3)
+            installationPlan.runStoragePreflight()
+        Qt.callLater(syncFooterStep)
+    }
+
+    function syncFooterStep() {
+        if (!stepStack.busy)
+            footerStep = currentStep
+    }
 
     function goBack() {
         if (currentStep > 0 && !stepStack.busy) {
@@ -41,6 +51,14 @@ Maui.ApplicationWindow {
             stepStack.pushItem([welcomePage, userPage,
                                 partitioningPage, summaryPage][currentStep + 1])
             currentStep++
+        }
+    }
+
+    Connections {
+        target: stepStack
+        function onBusyChanged() {
+            if (!stepStack.busy)
+                root.footerStep = root.currentStep
         }
     }
 
@@ -452,7 +470,7 @@ Maui.ApplicationWindow {
                 onClicked: Qt.quit()
             },
             ToolSeparator {
-                visible: quitInstallerButton.visible && introBackButton.visible
+                visible: quitInstallerButton.visible && introBackButton.shown
                 topPadding: 10
                 bottomPadding: 10
             }
@@ -460,13 +478,13 @@ Maui.ApplicationWindow {
 
         footBar.leftContent: Button {
             id: introBackButton
+            readonly property bool shown: root.showingIntro || introToWelcomeAnimation.running
+                || (!root.simulationActive && root.footerStep > 0)
             text: root.showingIntro || introToWelcomeAnimation.running ? qsTr("Not Now") : qsTr("Previous Step")
-            visible: root.showingIntro || introToWelcomeAnimation.running
-                || (!root.simulationActive && root.currentStep > 0)
-            enabled: root.showingIntro || introToWelcomeAnimation.running
+            visible: shown
+            enabled: shown && (root.showingIntro || introToWelcomeAnimation.running
                 ? !introAnimation.running
-                : root.currentStep > 0 && !stepStack.busy && !privilegedInstaller.busy
-                    && !privilegedInstaller.installationFinished
+                : !privilegedInstaller.busy && !privilegedInstaller.installationFinished)
             Maui.Controls.status: root.showingIntro || introToWelcomeAnimation.running
                 ? Maui.Controls.Negative : Maui.Controls.Normal
             onClicked: {
@@ -483,7 +501,7 @@ Maui.ApplicationWindow {
             id: stepIndicator
             Layout.alignment: Qt.AlignHCenter
             count: root.steps.length
-            currentIndex: root.currentStep
+            currentIndex: root.footerStep
             visible: !root.showingIntro && !root.simulationActive
             opacity: 0
 
@@ -500,14 +518,14 @@ Maui.ApplicationWindow {
 
         footBar.rightContent: Button {
             visible: root.showingIntro || !root.simulationActive
-            text: root.showingIntro ? qsTr("Install Nitrux")
-                : (root.currentStep < root.steps.length - 1
+            text: root.showingIntro || introToWelcomeAnimation.running ? qsTr("Install Nitrux")
+                : (root.footerStep < root.steps.length - 1
                     ? qsTr("Continue")
                     : (installationPlan.debugMode ? qsTr("Simulate installation")
                         : (privilegedInstaller.busy ? qsTr("Installing…") : qsTr("Install"))))
             enabled: root.showingIntro ? !introAnimation.running
-                : !stepStack.busy && ((root.currentStep < root.steps.length - 1
-                    && (root.currentStep !== 2 || partitioningPage.readyToContinue))
+                : ((root.footerStep < root.steps.length - 1
+                    && (root.footerStep !== 2 || partitioningPage.readyToContinue))
                     || (installationPlan.debugMode && installationPlan.planValid)
                     || (!installationPlan.debugMode && installationPlan.planValid
                         && installationPlan.storagePreflightComplete
@@ -515,7 +533,7 @@ Maui.ApplicationWindow {
                         && !privilegedInstaller.installationFinished))
             Maui.Controls.status: Maui.Controls.Positive
             onClicked: {
-                if (introToWelcomeAnimation.running)
+                if (introToWelcomeAnimation.running || stepStack.busy || privilegedInstaller.busy)
                     return
                 if (root.showingIntro) {
                     introToWelcomeAnimation.start()

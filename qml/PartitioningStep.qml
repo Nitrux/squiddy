@@ -92,7 +92,6 @@ ColumnLayout {
                 && assignmentCount("/home") <= 1 && assignmentCount("/var/lib") <= 1
                 && assignmentCount("swap") <= 1))
 
-    ButtonGroup { id: partitioningModeGroup }
     ButtonGroup { id: targetDiskSelectionGroup; exclusive: true }
 
     Maui.SectionHeader {
@@ -204,69 +203,44 @@ ColumnLayout {
                 text2: qsTr("Choose how to use this disk.")
             }
 
-            RadioButton {
+            ComboBox {
+                id: partitioningModeCombo
                 Layout.fillWidth: true
-                text: qsTr("Use the whole disk")
-                checked: installationPlan.partitioningMode === "automated"
-                ButtonGroup.group: partitioningModeGroup
-                onClicked: installationPlan.partitioningMode = "automated"
-            }
-
-            Maui.SectionHeader {
-                Layout.fillWidth: true
-                text2: qsTr("Erase the disk and create Nitrux partitions.")
-                label2.wrapMode: Text.WordWrap
-            }
-
-            RadioButton {
-                Layout.fillWidth: true
-                text: qsTr("Install alongside existing partitions")
-                checked: installationPlan.partitioningMode === "share"
-                ButtonGroup.group: partitioningModeGroup
-                onClicked: installationPlan.partitioningMode = "share"
-            }
-
-            Maui.SectionHeader {
-                Layout.fillWidth: true
-                text2: installationPlan.targetDiskInfo.gpt && partitioningStep.hasShareSource()
-                    ? qsTr("Use free space or shrink a supported partition.")
-                    : qsTr("Requires a GPT disk with free or supported shrinkable space.")
-                label2.wrapMode: Text.WordWrap
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-
-                RadioButton {
-                    Layout.fillWidth: true
-                    text: qsTr("Manual partitioning")
-                    checked: installationPlan.partitioningMode === "manual"
-                    ButtonGroup.group: partitioningModeGroup
-                    onClicked: installationPlan.partitioningMode = "manual"
+                Layout.leftMargin: Maui.Style.space.small
+                Layout.rightMargin: Maui.Style.space.small
+                model: [
+                    { text: qsTr("Use the whole disk"), value: "automated" },
+                    { text: qsTr("Install alongside existing partitions"), value: "share" },
+                    { text: qsTr("Manual partitioning"), value: "manual" }
+                ]
+                textRole: "text"
+                valueRole: "value"
+                currentIndex: model.findIndex(choice => choice.value === installationPlan.partitioningMode)
+                onActivated: installationPlan.partitioningMode = currentValue
+                popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 4)
+                popupScrollBar: true
+                delegate: MenuItem {
+                    width: ListView.view.width
+                    text: partitioningModeCombo.model[index].text
+                    highlighted: partitioningModeCombo.highlightedIndex === index
                 }
+            }
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                flat: true
+                visible: installationPlan.partitioningMode === "manual"
+                label1.text: qsTr("Manual Partitioning")
+                label2.text: installationPlan.manualPartitionLayout.length > 0
+                    ? qsTr("%1 partition entries in the staged layout.")
+                        .arg(installationPlan.manualPartitionLayout.length)
+                    : qsTr("Assign partitions for Nitrux.")
+                label2.wrapMode: Text.WordWrap
 
                 Button {
-                    visible: installationPlan.partitioningMode === "manual"
-                    text: qsTr("Edit partitions")
+                    text: qsTr("Edit Partitions")
                     onClicked: manualPartitionEditor.open()
                 }
-            }
-
-            Maui.SectionHeader {
-                Layout.fillWidth: true
-                visible: installationPlan.partitioningMode === "manual"
-                text2: qsTr("Assign partitions for Nitrux.")
-                label2.wrapMode: Text.WordWrap
-            }
-
-            Label {
-                Layout.fillWidth: true
-                visible: installationPlan.partitioningMode === "manual"
-                    && installationPlan.manualPartitionLayout.length > 0
-                text: qsTr("%1 partition entries in the staged layout.")
-                    .arg(installationPlan.manualPartitionLayout.length)
-                color: Maui.Theme.textColor
-                wrapMode: Text.WordWrap
             }
 
             Maui.FlexSectionItem {

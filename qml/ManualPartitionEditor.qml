@@ -1,9 +1,10 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Shapes
 import org.mauikit.controls as Maui
 
-Dialog {
+Maui.PopupPage {
     id: dialog
 
     required property string targetDevice
@@ -16,13 +17,29 @@ Dialog {
     property bool newPartitionTableConfirmed: false
 
     title: qsTr("Manual Partitioning")
-    parent: Overlay.overlay
-    modal: true
-    standardButtons: Dialog.Cancel | Dialog.Apply
-    width: Math.min(parent.width - Maui.Style.contentMargins * 2, Maui.Style.units.gridUnit * 58)
-    height: Math.min(implicitHeight, parent.height - Maui.Style.contentMargins * 4)
+    headBar.topPadding: Maui.Style.space.medium
+    headBar.bottomPadding: Maui.Style.space.medium
+    maxWidth: parent ? Math.min(parent.width - Maui.Style.contentMargins * 2,
+                                Maui.Style.units.gridUnit * 58) : implicitWidth
+    maxHeight: parent
+        ? Math.min(parent.height - Maui.Style.contentMargins * 2, implicitHeight)
+        : implicitHeight
     onOpened: resetDraft()
-    onApplied: partitionLayoutAccepted(draft)
+
+    actions: [
+        Action {
+            text: qsTr("Cancel")
+            onTriggered: dialog.close()
+        },
+        Action {
+            text: qsTr("Apply")
+            Maui.Controls.status: Maui.Controls.Positive
+            onTriggered: {
+                dialog.partitionLayoutAccepted(dialog.draft)
+                dialog.close()
+            }
+        }
+    ]
 
     signal partitionLayoutAccepted(var layout)
 
@@ -113,6 +130,30 @@ Dialog {
 
     function partitionDisplayName(device) {
         return String(device).split("/").pop()
+    }
+
+    function sizeDisplay(bytes) {
+        const value = Number(bytes)
+        if (!Number.isFinite(value) || value <= 0) return qsTr("Unknown")
+        if (value >= 1073741824) return qsTr("%1 GiB").arg((value / 1073741824).toFixed(2))
+        return qsTr("%1 MiB").arg(Math.max(1, Math.round(value / 1048576)))
+    }
+
+    function mountPointLabel(role) {
+        if (role === "/boot/efi") return qsTr("/boot/efi")
+        if (role === "/") return qsTr("/")
+        if (role === "/home") return qsTr("/home")
+        if (role === "/var/lib") return qsTr("/var/lib")
+        if (role === "swap") return qsTr("Swap")
+        return ""
+    }
+
+    function partitionFilesystem(row) {
+        if (row.mountPoint === "/boot/efi") return qsTr("FAT32")
+        if (row.mountPoint === "/") return qsTr("XFS")
+        if (row.mountPoint === "/home" || row.mountPoint === "/var/lib") return qsTr("F2FS")
+        if (row.mountPoint === "swap") return qsTr("Linuxswap")
+        return row.filesystem || dialog.typeLabel(row.typeGuid)
     }
 
     function availableExtents() {
@@ -215,141 +256,314 @@ Dialog {
         selectedIndex = draft.length - 1
     }
 
-    contentItem: ColumnLayout {
+    stack: ColumnLayout {
+        Layout.fillWidth: true
+        Layout.fillHeight: true
         spacing: Maui.Style.space.small
-
-        Maui.SectionHeader {
-            Layout.fillWidth: true
-            text2: qsTr("Changes apply at installation. Removed or formatted partitions lose data.")
-            label2.wrapMode: Text.WordWrap
-        }
 
         RowLayout {
             Layout.fillWidth: true
-            Label { Layout.fillWidth: true; text: qsTr("Device"); font: Maui.Style.h2Font }
-            Label { Layout.fillWidth: true; text: qsTr("Type"); font: Maui.Style.h2Font }
-            Label { Layout.fillWidth: true; text: qsTr("Mount point"); font: Maui.Style.h2Font }
-            Label { Layout.fillWidth: true; text: qsTr("Size"); font: Maui.Style.h2Font }
-            Label { Layout.fillWidth: true; text: qsTr("Label"); font: Maui.Style.h2Font }
-            Label { Layout.fillWidth: true; text: qsTr("Format"); font: Maui.Style.h2Font }
-            Label { Layout.fillWidth: true; text: qsTr("Encrypt"); font: Maui.Style.h2Font }
+            Layout.rightMargin: Maui.Style.contentMargins
+            Layout.topMargin: Maui.Style.space.medium
+            Layout.bottomMargin: Maui.Style.space.medium
+            Maui.SectionHeader {
+                Layout.fillWidth: true
+                text2: qsTr("Changes apply at installation. Removed or formatted partitions lose data.")
+                label2.wrapMode: Text.WordWrap
+            }
+            Button {
+                text: qsTr("Revert All Changes")
+                enabled: dialog.draft.some(partition => partition.action !== "keep")
+                    || dialog.draft.some(partition => !!partition.mountPoint)
+                onClicked: dialog.resetDraft(true)
+            }
         }
 
-        Rectangle {
+        ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.minimumHeight: Maui.Style.rowHeight * 8
-            color: "transparent"
-            border.color: Maui.Theme.backgroundColor
-            border.width: 1
-            radius: Maui.Style.radiusV
+            Layout.leftMargin: Maui.Style.contentMargins
+            Layout.rightMargin: Maui.Style.contentMargins
+            spacing: Maui.Style.space.small
 
-            ScrollView {
-                anchors.fill: parent
-                clip: true
+            Item {
+                id: partitionMap
+                Layout.fillWidth: true
+                Layout.preferredHeight: Maui.Style.rowHeight * 0.55
+                readonly property real totalSectors: Math.max(1,
+                    Math.floor(Number(dialog.diskInfo.sizeBytes) / Number(dialog.diskInfo.sectorSize)))
 
-                ColumnLayout {
-                    width: parent.width
+                Rectangle {
+                    anchors.fill: parent
+                    radius: Maui.Style.radiusV
+                    color: Qt.rgba(Maui.Theme.textColor.r, Maui.Theme.textColor.g,
+                                   Maui.Theme.textColor.b, 0.08)
+                    border.color: Qt.rgba(Maui.Theme.textColor.r, Maui.Theme.textColor.g,
+                                          Maui.Theme.textColor.b, 0.25)
+                    border.width: 1
+                }
+                Repeater {
+                    model: dialog.draft.filter(row => row.action !== "delete")
+                    delegate: Rectangle {
+                        required property int index
+                        required property var modelData
+                        readonly property real segmentHue: (index * 0.19 + 0.54) % 1
+                        readonly property color segmentColor: Qt.hsla(segmentHue, 0.52, 0.48, 1)
+                        readonly property color segmentBorderColor: Qt.hsla(segmentHue, 0.52, 0.40, 1)
+                        x: Math.max(0, Number(modelData.startSector) / partitionMap.totalSectors * partitionMap.width)
+                        width: Math.max(0, Number(modelData.sectorCount) / partitionMap.totalSectors * partitionMap.width)
+                        height: partitionMap.height
+                        color: segmentColor
+                        border.color: segmentBorderColor
+                        border.width: 1
+                    }
+                }
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.topMargin: Maui.Style.contentMargins + Maui.Style.space.medium - Maui.Style.space.small
+                implicitHeight: partitionLegend.implicitHeight
+                Row {
+                    id: partitionLegend
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: Maui.Style.space.small
                     Repeater {
-                        model: dialog.draft
+                        model: dialog.draft.filter(row => row.action !== "delete")
                         delegate: RowLayout {
                             required property int index
                             required property var modelData
-                            Layout.fillWidth: true
-                            spacing: Maui.Style.space.small
-                            opacity: modelData.action === "delete" ? 0.5 : 1
-
-                            TapHandler { onTapped: dialog.selectedIndex = index }
-
+                            spacing: Maui.Style.space.tiny
+                            Rectangle {
+                                Layout.preferredWidth: Maui.Style.iconSizes.small
+                                Layout.preferredHeight: Maui.Style.iconSizes.small
+                                radius: Maui.Style.radiusV / 2
+                                color: Qt.hsla((index * 0.19 + 0.54) % 1, 0.52, 0.48, 1)
+                            }
                             Label {
-                                Layout.fillWidth: true
-                                text: dialog.partitionDisplayName(modelData.device)
-                                elide: Text.ElideMiddle
-                                font.strikeout: modelData.action === "delete"
-                            }
-
-                            Label {
-                                Layout.fillWidth: true
-                                text: modelData.filesystem || dialog.typeLabel(modelData.typeGuid)
-                                elide: Text.ElideRight
-                            }
-
-                            ComboBox {
-                                Layout.fillWidth: true
-                                textRole: "text"
-                                valueRole: "value"
-                                model: [
-                                    {text: qsTr("Not used"), value: ""},
-                                    {text: qsTr("EFI System Partition"), value: "/boot/efi"},
-                                    {text: qsTr("Root"), value: "/"},
-                                    {text: qsTr("Home"), value: "/home"},
-                                    {text: qsTr("System data"), value: "/var/lib"},
-                                    {text: qsTr("Linux swap"), value: "swap"}
-                                ]
-                                currentIndex: Math.max(0, model.findIndex(item => item.value === modelData.mountPoint))
-                                onActivated: dialog.updateRow(index, {
-                                    mountPoint: currentValue,
-                                    filesystemLabel: currentValue ? (dialog.labels[currentValue] || dialog.defaultLabel(currentValue)) : "",
-                                    encrypted: false,
-                                    format: !!currentValue,
-                                    plannedTypeGuid: currentValue ? dialog.typeForRole(currentValue, false) : modelData.typeGuid
-                                })
-                                enabled: modelData.action !== "delete"
-                                    && (dialog.diskInfo.gpt || dialog.newPartitionTableConfirmed)
-                                popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 7)
-                                popupScrollBar: true
-                            }
-
-                            Maui.TextField {
-                                Layout.fillWidth: true
-                                Layout.preferredWidth: Maui.Style.units.gridUnit * 5
-                                text: String(Math.floor(Number(modelData.sectorCount) * Number(dialog.diskInfo.sectorSize) / 1048576))
-                                inputMethodHints: Qt.ImhDigitsOnly
-                                validator: RegularExpressionValidator { regularExpression: /^[0-9]{1,12}$/ }
-                                enabled: modelData.action !== "delete"
-                                    && (dialog.diskInfo.gpt || dialog.newPartitionTableConfirmed)
-                                onEditingFinished: {
-                                    const sectors = Math.floor((Number(text) * 1048576) / Number(dialog.diskInfo.sectorSize))
-                                    if (sectors > 0) dialog.updateRow(index, {
-                                        sectorCount: sectors,
-                                        sizeBytes: sectors * Number(dialog.diskInfo.sectorSize),
-                                        action: modelData.action === "create" ? "create" : "resize"
-                                    })
-                                }
-                            }
-
-                            Maui.TextField {
-                                Layout.fillWidth: true
-                                placeholderText: modelData.mountPoint ? dialog.defaultLabel(modelData.mountPoint)
-                                    : qsTr("Partition label")
-                                text: modelData.mountPoint ? modelData.filesystemLabel : modelData.label
-                                maximumLength: modelData.mountPoint ? 11 : 36
-                                validator: RegularExpressionValidator {
-                                    regularExpression: modelData.mountPoint
-                                        ? /^[A-Za-z0-9_]{1,11}$/ : /^[A-Za-z0-9 _.-]{0,36}$/
-                                }
-                                enabled: modelData.action !== "delete"
-                                    && (dialog.diskInfo.gpt || dialog.newPartitionTableConfirmed)
-                                onEditingFinished: dialog.updateRow(index, modelData.mountPoint
-                                    ? {filesystemLabel: text, label: text} : {label: text})
-                            }
-
-                            CheckBox {
-                                checked: !!modelData.mountPoint
-                                enabled: false
-                            }
-
-                            Switch {
-                                visible: !!modelData.mountPoint && modelData.mountPoint !== "/boot/efi"
-                                checked: !!modelData.encrypted
-                                enabled: modelData.action !== "delete"
-                                    && (dialog.diskInfo.gpt || dialog.newPartitionTableConfirmed)
-                                onToggled: dialog.updateRow(index, {
-                                    encrypted: checked,
-                                    plannedTypeGuid: dialog.typeForRole(modelData.mountPoint, checked)
-                                })
+                                text: qsTr("%1 · %2")
+                                    .arg(dialog.partitionDisplayName(modelData.device))
+                                    .arg(dialog.sizeDisplay(modelData.sizeBytes))
+                                color: Maui.Theme.textColor
+                                opacity: 0.8
                             }
                         }
+                    }
+                }
+            }
+
+            Rectangle {
+                id: partitionTable
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.topMargin: Maui.Style.contentMargins + Maui.Style.space.medium - Maui.Style.space.small
+                Layout.preferredHeight: Maui.Style.rowHeight * Math.max(4, dialog.draft.length + 2)
+                Layout.minimumHeight: Maui.Style.rowHeight * Math.max(4, dialog.draft.length + 2)
+                color: "transparent"
+                border.color: Qt.rgba(Maui.Theme.textColor.r, Maui.Theme.textColor.g,
+                                      Maui.Theme.textColor.b, 0.25)
+                border.width: 1
+                radius: Maui.Style.radiusV
+
+                ColumnLayout {
+                    id: partitionTableContent
+                    readonly property real nameStart: 0.00
+                    readonly property real nameWidth: 0.23
+                    readonly property real filesystemStart: 0.25
+                    readonly property real filesystemWidth: 0.15
+                    readonly property real labelStart: 0.42
+                    readonly property real labelWidth: 0.20
+                    readonly property real mountPointStart: 0.64
+                    readonly property real mountPointWidth: 0.20
+                    readonly property real sizeStart: 0.86
+                    readonly property real sizeWidth: 0.14
+                    readonly property real firstSeparator: 0.24
+                    readonly property real secondSeparator: 0.41
+                    readonly property real thirdSeparator: 0.63
+                    readonly property real fourthSeparator: 0.85
+                    readonly property color separatorColor: Qt.rgba(Maui.Theme.textColor.r,
+                        Maui.Theme.textColor.g, Maui.Theme.textColor.b, 0.18)
+                    anchors.fill: parent
+                    anchors.bottomMargin: Maui.Style.space.small
+                    anchors.leftMargin: 0
+                    anchors.rightMargin: 0
+                    spacing: Maui.Style.space.small
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Maui.Style.rowHeight
+                        color: "transparent"
+                        Shape {
+                            id: headerBackground
+                            anchors.fill: parent
+                            anchors.margins: partitionTable.border.width
+                            readonly property real cornerRadius: Math.max(0,
+                                partitionTable.radius - partitionTable.border.width)
+
+                            ShapePath {
+                                fillColor: Qt.rgba(Maui.Theme.textColor.r, Maui.Theme.textColor.g,
+                                                   Maui.Theme.textColor.b, 0.04)
+                                strokeColor: "transparent"
+                                startX: headerBackground.cornerRadius
+                                startY: 0
+                                PathLine { x: headerBackground.width - headerBackground.cornerRadius; y: 0 }
+                                PathArc {
+                                    x: headerBackground.width
+                                    y: headerBackground.cornerRadius
+                                    radiusX: headerBackground.cornerRadius
+                                    radiusY: headerBackground.cornerRadius
+                                    direction: PathArc.Clockwise
+                                }
+                                PathLine { x: headerBackground.width; y: headerBackground.height }
+                                PathLine { x: 0; y: headerBackground.height }
+                                PathLine { x: 0; y: headerBackground.cornerRadius }
+                                PathArc {
+                                    x: headerBackground.cornerRadius
+                                    y: 0
+                                    radiusX: headerBackground.cornerRadius
+                                    radiusY: headerBackground.cornerRadius
+                                    direction: PathArc.Clockwise
+                                }
+                            }
+                        }
+                        Item {
+                            anchors.fill: parent
+                            anchors.leftMargin: Maui.Style.space.tiny
+                            anchors.rightMargin: Maui.Style.space.tiny
+                            Label { x: parent.width * partitionTableContent.nameStart + Maui.Style.space.small; width: Math.max(0, parent.width * partitionTableContent.nameWidth - Maui.Style.space.small); anchors.verticalCenter: parent.verticalCenter; text: qsTr("Name"); font: Maui.Style.h2Font; elide: Text.ElideRight }
+                            Label { x: parent.width * partitionTableContent.filesystemStart; width: parent.width * partitionTableContent.filesystemWidth; anchors.verticalCenter: parent.verticalCenter; text: qsTr("File System"); font: Maui.Style.h2Font; elide: Text.ElideRight }
+                            Label { x: parent.width * partitionTableContent.labelStart; width: parent.width * partitionTableContent.labelWidth; anchors.verticalCenter: parent.verticalCenter; text: qsTr("Label"); font: Maui.Style.h2Font; elide: Text.ElideRight }
+                            Label { x: parent.width * partitionTableContent.mountPointStart; width: parent.width * partitionTableContent.mountPointWidth; anchors.verticalCenter: parent.verticalCenter; text: qsTr("Mount Point"); font: Maui.Style.h2Font; elide: Text.ElideRight }
+                            Label { x: parent.width * partitionTableContent.sizeStart + Maui.Style.space.small; width: Math.max(0, parent.width * partitionTableContent.sizeWidth - Maui.Style.space.small * 2); anchors.verticalCenter: parent.verticalCenter; text: qsTr("Size"); font: Maui.Style.h2Font; elide: Text.ElideRight }
+                            Rectangle { x: parent.width * partitionTableContent.firstSeparator; width: partitionTable.border.width; height: parent.height; color: partitionTableContent.separatorColor }
+                            Rectangle { x: parent.width * partitionTableContent.secondSeparator; width: partitionTable.border.width; height: parent.height; color: partitionTableContent.separatorColor }
+                            Rectangle { x: parent.width * partitionTableContent.thirdSeparator; width: partitionTable.border.width; height: parent.height; color: partitionTableContent.separatorColor }
+                            Rectangle { x: parent.width * partitionTableContent.fourthSeparator; width: partitionTable.border.width; height: parent.height; color: partitionTableContent.separatorColor }
+                        }
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.leftMargin: partitionTable.border.width
+                            anchors.rightMargin: partitionTable.border.width
+                            height: partitionTable.border.width
+                            color: partitionTable.border.color
+                        }
+                    }
+
+                    Item {
+                        id: partitionRowsArea
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+
+                        ListView {
+                            id: partitionRows
+                            anchors.fill: parent
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            boundsMovement: Flickable.StopAtBounds
+                            model: dialog.draft.map(row => ({
+                                device: row.device,
+                                mountPoint: row.mountPoint,
+                                filesystemLabel: row.filesystemLabel,
+                                label: row.label,
+                                filesystem: row.filesystem,
+                                typeGuid: row.typeGuid,
+                                action: row.action,
+                                sizeBytes: row.sizeBytes
+                            }))
+                            spacing: Maui.Style.space.tiny
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                            delegate: Rectangle {
+                                required property int index
+                                required property string device
+                                required property string mountPoint
+                                required property string filesystemLabel
+                                required property string label
+                                required property string filesystem
+                                required property string typeGuid
+                                required property string action
+                                required property var sizeBytes
+                                width: partitionRows.width
+                                height: Maui.Style.rowHeight
+                                radius: Maui.Style.radiusV / 2
+                                color: dialog.selectedIndex === index
+                                    ? Qt.rgba(Maui.Theme.textColor.r, Maui.Theme.textColor.g,
+                                              Maui.Theme.textColor.b, 0.1) : "transparent"
+                                opacity: action === "delete" ? 0.5 : 1
+                                border.color: dialog.selectedIndex === index
+                                    ? Maui.Theme.highlightColor : "transparent"
+                                border.width: 1
+                                TapHandler { onTapped: dialog.selectedIndex = index }
+
+                                Item {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: Maui.Style.space.tiny
+                                    anchors.rightMargin: Maui.Style.space.tiny
+                                    Label {
+                                        x: parent.width * partitionTableContent.nameStart + Maui.Style.space.small
+                                        width: Math.max(0, parent.width * partitionTableContent.nameWidth - Maui.Style.space.small)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: dialog.partitionDisplayName(device)
+                                        elide: Text.ElideMiddle
+                                        font.strikeout: action === "delete"
+                                    }
+                                    Label {
+                                        x: parent.width * partitionTableContent.filesystemStart
+                                        width: parent.width * partitionTableContent.filesystemWidth
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: dialog.partitionFilesystem({mountPoint: mountPoint, filesystem: filesystem, typeGuid: typeGuid})
+                                        elide: Text.ElideRight
+                                    }
+                                    Label {
+                                        x: parent.width * partitionTableContent.labelStart
+                                        width: parent.width * partitionTableContent.labelWidth
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: mountPoint ? filesystemLabel : label
+                                        elide: Text.ElideRight
+                                    }
+                                    Label {
+                                        x: parent.width * partitionTableContent.mountPointStart
+                                        width: parent.width * partitionTableContent.mountPointWidth
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: dialog.mountPointLabel(mountPoint)
+                                        elide: Text.ElideRight
+                                    }
+                                    Label {
+                                        x: parent.width * partitionTableContent.sizeStart + Maui.Style.space.small
+                                        width: Math.max(0, parent.width * partitionTableContent.sizeWidth - Maui.Style.space.small * 2)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: dialog.sizeDisplay(sizeBytes)
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                        }
+
+                        Label {
+                            anchors.centerIn: parent
+                            visible: dialog.draft.length === 0
+                            text: qsTr("No partitions are present on this disk.")
+                            color: Maui.Theme.textColor
+                            opacity: 0.7
+                        }
+                    }
+                }
+
+                Repeater {
+                    model: [partitionTableContent.firstSeparator,
+                            partitionTableContent.secondSeparator,
+                            partitionTableContent.thirdSeparator,
+                            partitionTableContent.fourthSeparator]
+                    delegate: Rectangle {
+                        required property real modelData
+                        x: partitionTableContent.x + Maui.Style.space.tiny
+                            + (partitionRowsArea.width - Maui.Style.space.tiny * 2) * modelData
+                        y: partitionTableContent.y + partitionRowsArea.y
+                        width: partitionTable.border.width
+                        height: partitionRowsArea.height
+                        color: partitionTableContent.separatorColor
                     }
                 }
             }
@@ -357,30 +571,50 @@ Dialog {
 
         RowLayout {
             Layout.fillWidth: true
+            Layout.leftMargin: Maui.Style.contentMargins
+            Layout.rightMargin: Maui.Style.contentMargins
+            Layout.topMargin: Maui.Style.space.medium
+            Layout.bottomMargin: Maui.Style.space.medium
             Button {
-                text: qsTr("Add")
-                enabled: dialog.diskInfo.gpt || dialog.newPartitionTableConfirmed
-                onClicked: addDialog.open()
-            }
-            Button {
-                text: qsTr("Remove")
-                enabled: dialog.selectedIndex >= 0 && dialog.draft[dialog.selectedIndex].action !== "delete"
-                onClicked: {
-                    const row = dialog.draft[dialog.selectedIndex]
-                    if (row.action === "create")
-                        dialog.draft = dialog.draft.filter((_, index) => index !== dialog.selectedIndex)
-                    else
-                        dialog.updateRow(dialog.selectedIndex, {action: "delete", mountPoint: ""})
-                    dialog.selectedIndex = -1
-                }
-            }
-            Item { Layout.fillWidth: true }
-            Button {
-                text: qsTr("New partition table")
+                text: qsTr("New Partition Table")
                 enabled: !dialog.diskInfo.gpt || dialog.draft.some(partition => partition.action !== "delete")
                 onClicked: newTableDialog.open()
             }
-            Button { text: qsTr("Revert"); onClicked: dialog.resetDraft(true) }
+            Item { Layout.fillWidth: true }
+            Maui.ToolActions {
+                display: ToolButton.IconOnly
+                checkable: false
+                flat: true
+
+                Action {
+                    text: qsTr("Create")
+                    icon.name: "list-add"
+                    enabled: dialog.diskInfo.gpt || dialog.newPartitionTableConfirmed
+                    onTriggered: addDialog.open()
+                }
+                Action {
+                    text: qsTr("Edit")
+                    icon.name: "document-edit"
+                    enabled: dialog.selectedIndex >= 0
+                        && dialog.draft[dialog.selectedIndex].action !== "delete"
+                        && (dialog.diskInfo.gpt || dialog.newPartitionTableConfirmed)
+                    onTriggered: editPartitionDialog.open()
+                }
+                Action {
+                    text: qsTr("Delete")
+                    icon.name: "list-remove"
+                    enabled: dialog.selectedIndex >= 0
+                        && dialog.draft[dialog.selectedIndex].action !== "delete"
+                    onTriggered: {
+                        const row = dialog.draft[dialog.selectedIndex]
+                        if (row.action === "create")
+                            dialog.draft = dialog.draft.filter((_, index) => index !== dialog.selectedIndex)
+                        else
+                            dialog.updateRow(dialog.selectedIndex, {action: "delete", mountPoint: ""})
+                        dialog.selectedIndex = -1
+                    }
+                }
+            }
         }
     }
 
@@ -392,6 +626,180 @@ Dialog {
         if (value === "0fc63daf-8483-4772-8e79-3d69d8477de4" || value === "83") return qsTr("Linux")
         if (value === "ef") return qsTr("EFI")
         return qsTr("Other")
+    }
+
+    Dialog {
+        id: editPartitionDialog
+        title: dialog.selectedIndex >= 0 && dialog.selectedIndex < dialog.draft.length
+            && dialog.draft[dialog.selectedIndex].action === "create"
+            ? qsTr("Create Partition") : qsTr("Edit Existing Partition")
+        modal: true
+        standardButtons: Dialog.Cancel | Dialog.Apply
+        property string contentValue: "keep"
+        property string mountPointValue: ""
+        property string sizeText: ""
+        property string labelText: ""
+        property bool encryptedValue: false
+
+        onOpened: {
+            if (dialog.selectedIndex < 0 || dialog.selectedIndex >= dialog.draft.length)
+                return
+            const row = dialog.draft[dialog.selectedIndex]
+            contentValue = row.format || row.action === "create" ? "format" : "keep"
+            mountPointValue = row.mountPoint || ""
+            sizeText = String(Math.floor(Number(row.sectorCount) * Number(dialog.diskInfo.sectorSize) / 1048576))
+            labelText = row.mountPoint ? (row.filesystemLabel || "") : (row.label || "")
+            encryptedValue = !!row.encrypted
+        }
+        onApplied: {
+            if (dialog.selectedIndex < 0 || dialog.selectedIndex >= dialog.draft.length)
+                return
+            const row = dialog.draft[dialog.selectedIndex]
+            const sizeMiB = Number(sizeText)
+            const sectorCount = Math.floor((sizeMiB * 1048576) / Number(dialog.diskInfo.sectorSize))
+            if (sectorCount < 1)
+                return
+            const formatPartition = contentValue === "format"
+            const role = formatPartition ? mountPointValue : ""
+            const encrypted = !!role && role !== "/boot/efi" && encryptedValue
+            const action = row.action === "create" ? "create"
+                : (sectorCount !== Number(row.originalSectorCount) ? "resize" : row.action)
+            const label = labelText || (role ? dialog.defaultLabel(role) : "")
+            dialog.updateRow(dialog.selectedIndex, {
+                mountPoint: role,
+                sectorCount: sectorCount,
+                sizeBytes: sectorCount * Number(dialog.diskInfo.sectorSize),
+                action: action,
+                label: label,
+                filesystemLabel: role ? label : "",
+                encrypted: encrypted,
+                format: formatPartition && !!role,
+                plannedTypeGuid: role ? dialog.typeForRole(role, encrypted) : row.typeGuid
+            })
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Maui.Style.space.small
+
+            Maui.SectionHeader {
+                Layout.fillWidth: true
+                text1: dialog.selectedIndex >= 0 && dialog.selectedIndex < dialog.draft.length
+                    ? dialog.partitionDisplayName(dialog.draft[dialog.selectedIndex].device) : qsTr("Partition")
+                text2: dialog.selectedIndex >= 0 && dialog.selectedIndex < dialog.draft.length
+                    ? dialog.sizeDisplay(dialog.draft[dialog.selectedIndex].sizeBytes) : ""
+            }
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                label1.text: qsTr("Size")
+                Maui.TextField {
+                    Layout.fillWidth: true
+                    text: editPartitionDialog.sizeText
+                    inputMethodHints: Qt.ImhDigitsOnly
+                    validator: RegularExpressionValidator { regularExpression: /^[0-9]{1,12}$/ }
+                    onTextChanged: editPartitionDialog.sizeText = text
+                    placeholderText: qsTr("MiB")
+                }
+            }
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                label1.text: qsTr("Content")
+                template.content: RowLayout {
+                    ButtonGroup { id: contentButtonGroup }
+                    RadioButton {
+                        text: qsTr("Keep")
+                        checked: editPartitionDialog.contentValue === "keep"
+                        ButtonGroup.group: contentButtonGroup
+                        onToggled: if (checked) editPartitionDialog.contentValue = "keep"
+                    }
+                    RadioButton {
+                        text: qsTr("Format")
+                        checked: editPartitionDialog.contentValue === "format"
+                        ButtonGroup.group: contentButtonGroup
+                        enabled: dialog.diskInfo.gpt || dialog.newPartitionTableConfirmed
+                        onToggled: if (checked) editPartitionDialog.contentValue = "format"
+                    }
+                }
+            }
+
+            Maui.SectionHeader {
+                Layout.fillWidth: true
+                visible: editPartitionDialog.contentValue === "format"
+                text2: qsTr("Formatting erases all data on this partition.")
+                label2.wrapMode: Text.WordWrap
+            }
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                visible: editPartitionDialog.contentValue === "format"
+                label1.text: qsTr("File System")
+                ComboBox {
+                    Layout.fillWidth: true
+                    textRole: "text"
+                    valueRole: "value"
+                    model: [{
+                        text: editPartitionDialog.mountPointValue.length > 0
+                            ? dialog.partitionFilesystem({mountPoint: editPartitionDialog.mountPointValue})
+                            : qsTr("Choose a mount point first"),
+                        value: editPartitionDialog.mountPointValue
+                    }]
+                    currentIndex: 0
+                    enabled: false
+                }
+            }
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                visible: editPartitionDialog.contentValue === "format"
+                label1.text: qsTr("Mount Point")
+                ComboBox {
+                    Layout.fillWidth: true
+                    textRole: "text"
+                    valueRole: "value"
+                    model: [
+                        {text: qsTr("Not used"), value: ""},
+                        {text: qsTr("EFI System Partition"), value: "/boot/efi"},
+                        {text: qsTr("Root"), value: "/"},
+                        {text: qsTr("Home"), value: "/home"},
+                        {text: qsTr("System data"), value: "/var/lib"},
+                        {text: qsTr("Linux swap"), value: "swap"}
+                    ]
+                    currentIndex: Math.max(0, model.findIndex(item => item.value === editPartitionDialog.mountPointValue))
+                    onActivated: editPartitionDialog.mountPointValue = currentValue
+                    popup.height: Math.min(popup.implicitHeight, Maui.Style.rowHeight * 7)
+                    popupScrollBar: true
+                }
+            }
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                visible: editPartitionDialog.contentValue === "format"
+                label1.text: qsTr("FS Label")
+                Maui.TextField {
+                    Layout.fillWidth: true
+                    text: editPartitionDialog.labelText
+                    maximumLength: editPartitionDialog.mountPointValue === "/boot/efi" ? 11 : 36
+                    validator: RegularExpressionValidator {
+                        regularExpression: editPartitionDialog.mountPointValue === "/boot/efi"
+                            ? /^[A-Za-z0-9_]{1,11}$/ : /^[A-Za-z0-9 _.-]{0,36}$/
+                    }
+                    onTextChanged: editPartitionDialog.labelText = text
+                }
+            }
+
+            Maui.FlexSectionItem {
+                Layout.fillWidth: true
+                visible: editPartitionDialog.contentValue === "format"
+                    && editPartitionDialog.mountPointValue.length > 0
+                    && editPartitionDialog.mountPointValue !== "/boot/efi"
+                label1.text: qsTr("Encrypt")
+                template.content: Switch {
+                    checked: editPartitionDialog.encryptedValue
+                    onToggled: editPartitionDialog.encryptedValue = checked
+                }
+            }
+        }
     }
 
     Dialog {
@@ -459,8 +867,10 @@ Dialog {
         onAccepted: {
             const extent = dialog.availableExtents()[extentIndex]
             const sectors = Math.floor((Number(sizeText) * 1048576) / Number(dialog.diskInfo.sectorSize))
-            if (extent && sectors > 0 && sectors <= extent.sectorCount)
+            if (extent && sectors > 0 && sectors <= extent.sectorCount) {
                 dialog.addPartition(extent.startSector, sectors)
+                Qt.callLater(() => editPartitionDialog.open())
+            }
         }
     }
 }
