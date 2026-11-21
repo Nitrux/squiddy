@@ -204,3 +204,18 @@ if(NOT TARGET uninstall)
         COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake
     )
 endif()
+
+target_precompile_headers(squiddy PRIVATE
+    <QDebug>
+    <QFileInfo>
+    <QGuiApplication>
+    <QQmlEngine>
+    <QQuickWindow>
+)
+
+target_precompile_headers(squiddy-installer-helper PRIVATE
+    <QDebug>
+    <QFileInfo>
+    <QObject>
+    <QString>
+)
